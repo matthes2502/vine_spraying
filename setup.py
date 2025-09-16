@@ -23,6 +23,7 @@ setup(
             "flow_sensor_node = my_spray_controller.publish_flow_rate:main",
             "pressure_node = my_spray_controller.publish_pressure:main",
             "bno085_node = my_spray_controller.publish_orientation:main",
+            "valve_control_node = my_spray_controller.valve_controller:main",
             "pump_test_node = my_spray_controller.pump_test_node:main",
         ],
     },

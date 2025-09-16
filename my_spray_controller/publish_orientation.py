@@ -59,7 +59,7 @@ class BNO085Node(Node):
         # ROS2 Subscriber for stop signal
         self.stop_sub = self.create_subscription(
             Bool,
-            '/sensors/stop',
+            '/peripherie    /stop',
             self.stop_callback,
             10
         )

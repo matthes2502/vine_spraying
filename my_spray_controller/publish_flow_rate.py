@@ -79,7 +79,7 @@ class FlowSensorNode(Node):
         # ROS2 Subscriber for stop signal
         self.stop_sub = self.create_subscription(
             Bool,
-            '/sensors/stop',  # Global stop topic
+            '/peripherie/stop',  # Global stop topic
             self.stop_callback,
             10
         )

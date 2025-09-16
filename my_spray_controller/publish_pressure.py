@@ -42,7 +42,7 @@ class ADS1115Node(Node):
 
         msg = FluidPressure()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.fluid_pressure = pressure_bar * 1e5  # bar → Pascal
+        msg.fluid_pressure = pressure_bar  # * 1e5  # bar → Pascal
         msg.variance = 0.0
 
         self.publisher_.publish(msg)

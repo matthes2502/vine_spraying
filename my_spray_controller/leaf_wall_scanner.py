@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 
 import rclpy
-import rclpy.time
 from rclpy.node import Node
+import rclpy.time
 from sensor_msgs.msg import LaserScan, PointCloud2, PointField
 from geometry_msgs.msg import Twist
 from std_msgs.msg import Bool, Float32MultiArray, MultiArrayDimension
@@ -32,9 +32,10 @@ class VerticalLidarNode(Node):
         self.declare_parameter('lateral_distance', 1.2)  # Distance to foliage wall (left/right)
         self.declare_parameter('grid_height_min', 0.4)  # Minimum height for grid (40cm)
         self.declare_parameter('grid_height_max', 2.0)  # Maximum height for grid (2m)
-        self.declare_parameter('grid_length', 1.0)  # Grid length in driving direction (1m)
-        self.declare_parameter('scan_history_distance', 5.0)  # Keep last X meters of scans
-        self.declare_parameter('output_directory', '/tmp/lidar_scans')
+        self.declare_parameter('grid_length', 0.2)  # Grid length in driving direction (1m)
+        self.declare_parameter('scan_history_distance', 1000.0)  # Keep last X meters of scans (set very high to keep all)
+        self.declare_parameter('save_to_file', False)  # Enable/disable saving to file
+        self.declare_parameter('output_directory', './lidar_scans')  # Save in current directory
         
         # Get parameters with type casting to ensure they're not None
         lateral_param = self.get_parameter('lateral_distance').value
@@ -42,6 +43,7 @@ class VerticalLidarNode(Node):
         height_max_param = self.get_parameter('grid_height_max').value
         grid_length_param = self.get_parameter('grid_length').value
         scan_history_param = self.get_parameter('scan_history_distance').value
+        save_to_file_param = self.get_parameter('save_to_file').value
         output_dir_param = self.get_parameter('output_directory').value
         
         # Ensure parameters are not None before casting
@@ -49,8 +51,9 @@ class VerticalLidarNode(Node):
         self.grid_height_min = float(height_min_param) if height_min_param is not None else 0.4
         self.grid_height_max = float(height_max_param) if height_max_param is not None else 2.0
         self.grid_length = float(grid_length_param) if grid_length_param is not None else 1.0
-        self.scan_history_distance = float(scan_history_param) if scan_history_param is not None else 5.0
-        self.output_directory = str(output_dir_param) if output_dir_param is not None else '/tmp/lidar_scans'
+        self.scan_history_distance = float(scan_history_param) if scan_history_param is not None else 1000.0
+        self.save_to_file = bool(save_to_file_param) if save_to_file_param is not None else False
+        self.output_directory = str(output_dir_param) if output_dir_param is not None else './lidar_scans'
         
         # Grid configuration
         self.grid_height_step = (self.grid_height_max - self.grid_height_min) / 3  # 3 height levels
@@ -60,18 +63,32 @@ class VerticalLidarNode(Node):
         ]
         
         # State variables
-        self.current_speed: float = 0.0  # m/s
+        self.current_speed: float = 0.2  # m/s
         self.last_scan_time: Optional[rclpy.time.Time] = None
         self.distance_traveled: float = 0.0  # Total distance traveled
         self.last_grid_publish_distance: float = 0.0  # Distance at last grid publish
+        self.laser_frame_id: str = "laser"  # Will be updated from laser scan messages
         
         # Data storage with type hints
         self.scan_buffer: Deque[Tuple[np.ndarray, float]] = deque()  # Store (points, y_position) tuples
         self.all_points: np.ndarray = np.array([])  # Current accumulated points
         
-        # Create output directory
-        os.makedirs(self.output_directory, exist_ok=True)
-        self.scan_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        # File handling
+        self.output_filename: Optional[str] = None
+        self.scan_timestamp: str = ""
+        
+        # Create output directory and filename only if saving is enabled
+        if self.save_to_file:
+            os.makedirs(self.output_directory, exist_ok=True)  # Creates directory if it doesn't exist
+            self.scan_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            self.output_filename = os.path.join(
+                self.output_directory, 
+                f"scan_session_{self.scan_timestamp}.npy"
+            )
+            self.get_logger().info(f"Saving enabled - will save to: {self.output_filename}")
+        else:
+            self.output_filename = None
+            self.get_logger().info("Saving disabled - data will not be saved to file")
         
         # Publishers
         self.pointcloud_publisher = self.create_publisher(
@@ -114,11 +131,26 @@ class VerticalLidarNode(Node):
         """Process incoming 2D laser scan and accumulate into 3D point cloud."""
         current_time = self.get_clock().now()
         
-        # Calculate distance traveled since last scan
+        # Store the frame_id from the laser scan for consistency
+        self.laser_frame_id = msg.header.frame_id
+        
+        # Calculate distance traveled based on speed and scan rate
+        # Using scan_time from LaserScan message if available, otherwise calculate from timestamps
         if self.last_scan_time is not None and self.current_speed != 0.0:
-            time_delta = (current_time - self.last_scan_time).nanoseconds / 1e9  # Convert to seconds
+            # Option 1: Use scan_time from message (time between scans)
+            if hasattr(msg, 'scan_time') and msg.scan_time > 0:
+                time_delta = msg.scan_time
+            else:
+                # Option 2: Calculate from ROS timestamps
+                time_delta = (current_time - self.last_scan_time).nanoseconds / 1e9
+            
             distance_increment = abs(self.current_speed * time_delta)
             self.distance_traveled += distance_increment
+            
+            # Log scan rate occasionally for debugging
+            if int(self.distance_traveled) % 10 == 0 and int(self.distance_traveled - distance_increment) % 10 != 0:
+                scan_rate = 1.0 / time_delta if time_delta > 0 else 0.0
+                self.get_logger().info(f"Scan rate: {scan_rate:.1f} Hz, Distance: {self.distance_traveled:.2f}m")
         
         self.last_scan_time = current_time
         
@@ -135,12 +167,12 @@ class VerticalLidarNode(Node):
             return
         
         # Convert to 3D points (vertical scan plane)
-        # X: lateral (left/right)
-        # Y: forward (driving direction) 
+        # X: forward (driving direction)
+        # Y: lateral (left/right)
         # Z: vertical (up/down)
-        x_points = ranges * np.cos(angles)  # Lateral distance
-        z_points = ranges * np.sin(angles)  # Vertical position
-        y_points = np.full_like(x_points, self.distance_traveled)  # Forward position
+        y_points = ranges * np.cos(angles)  # Lateral distance (left/right)
+        z_points = ranges * np.sin(angles)  # Vertical position (up/down)
+        x_points = np.full_like(y_points, self.distance_traveled)  # Forward position (driving direction)
         
         points_3d = np.stack((x_points, y_points, z_points), axis=-1)
         
@@ -178,7 +210,7 @@ class VerticalLidarNode(Node):
         
         msg = PointCloud2()
         msg.header.stamp = self.get_clock().now().to_msg()
-        msg.header.frame_id = "base_link"
+        msg.header.frame_id = self.laser_frame_id  # Use the same frame as the laser scan
         msg.height = 1
         msg.width = len(points)
         msg.is_bigendian = False
@@ -193,6 +225,11 @@ class VerticalLidarNode(Node):
         msg.data = cloud_data
         
         self.pointcloud_publisher.publish(msg)
+        
+        # Log first publish for debugging
+        if not hasattr(self, '_first_publish_logged'):
+            self.get_logger().info(f"Publishing point cloud with frame_id: {self.laser_frame_id}")
+            self._first_publish_logged = True
     
     def publish_grid_densities(self):
         """Calculate and publish point densities for each grid cell."""
@@ -201,24 +238,24 @@ class VerticalLidarNode(Node):
             return
         
         # Get points from last grid_length meters
-        min_y = self.distance_traveled - self.grid_length
+        min_x = self.distance_traveled - self.grid_length
         # Ensure all_points is a numpy array for indexing
         points_array = np.asarray(self.all_points)
-        grid_points = points_array[points_array[:, 1] >= min_y]
+        grid_points = points_array[points_array[:, 0] >= min_x]  # Changed from [:, 1] to [:, 0]
         
         if len(grid_points) == 0:
             return
         
-        # Separate left and right points
-        left_points = grid_points[grid_points[:, 0] < 0]  # Negative X = left
-        right_points = grid_points[grid_points[:, 0] > 0]  # Positive X = right
+        # Separate left and right points (in right-handed coordinate system)
+        left_points = grid_points[grid_points[:, 1] > 0]  # Positive Y = left
+        right_points = grid_points[grid_points[:, 1] < 0]  # Negative Y = right
         
-        # Calculate densities for left side
-        left_densities = self.calculate_side_densities(left_points, -self.lateral_distance)
+        # Calculate densities for left side (positive Y)
+        left_densities = self.calculate_side_densities(left_points, self.lateral_distance)
         self.publish_density_array(left_densities, self.grid_left_publisher, "left")
         
-        # Calculate densities for right side
-        right_densities = self.calculate_side_densities(right_points, self.lateral_distance)
+        # Calculate densities for right side (negative Y)
+        right_densities = self.calculate_side_densities(right_points, -self.lateral_distance)
         self.publish_density_array(right_densities, self.grid_right_publisher, "right")
         
         # Log summary
@@ -226,17 +263,14 @@ class VerticalLidarNode(Node):
             f"Grid densities at {self.distance_traveled:.2f}m - "
             f"Left: {left_densities}, Right: {right_densities}"
         )
-        
-        # Save current scan data
-        self.save_scan_data(grid_points)
     
-    def calculate_side_densities(self, points: np.ndarray, target_x: float) -> List[int]:
+    def calculate_side_densities(self, points: np.ndarray, target_y: float) -> List[int]:
         """
         Calculate point densities for one side (left or right) in 3 height zones.
         
         Args:
             points: Points for this side
-            target_x: Expected X coordinate for foliage wall (negative for left, positive for right)
+            target_y: Expected Y coordinate for foliage wall (positive for left, negative for right)
         
         Returns:
             List of 3 integers representing point counts in each height zone
@@ -248,7 +282,7 @@ class VerticalLidarNode(Node):
         
         # Filter points near the target lateral distance
         if len(points) > 0:
-            lateral_mask = np.abs(np.abs(points[:, 0]) - abs(target_x)) < lateral_tolerance
+            lateral_mask = np.abs(np.abs(points[:, 1]) - abs(target_y)) < lateral_tolerance  # Changed from [:, 0]
             filtered_points = points[lateral_mask]
         else:
             filtered_points = np.array([])
@@ -271,39 +305,33 @@ class VerticalLidarNode(Node):
     def publish_density_array(self, densities, publisher, side_name):
         """Publish density array as Float32MultiArray."""
         msg = Float32MultiArray()
-        
-        # Set up dimensions
-        dim = MultiArrayDimension()
-        dim.label = f"{side_name}_height_zones"
-        dim.size = len(densities)
-        dim.stride = 1
-        msg.layout.dim = [dim]
-        msg.layout.data_offset = 0
-        
-        # Convert to float and add to message
+        # Simply publish the 3 density values without complex metadata
         msg.data = [float(d) for d in densities]
-        
         publisher.publish(msg)
     
-    def save_scan_data(self, points):
-        """Save current scan data to file."""
-        filename = os.path.join(
-            self.output_directory, 
-            f"scan_{self.scan_timestamp}_dist_{self.distance_traveled:.2f}m.npy"
-        )
-        np.save(filename, points)
-        self.get_logger().debug(f"Saved scan data to {filename}")
+    def save_scan_data(self, points: np.ndarray):
+        """Save scan data to single session file if saving is enabled."""
+        if not self.save_to_file or self.output_filename is None or len(points) == 0:
+            return
+            
+        # Save/overwrite the complete point cloud to the session file
+        np.save(self.output_filename, points)
+        self.get_logger().debug(f"Updated scan file with {len(points)} points")
     
     def cleanup(self):
         """Clean up resources before shutdown."""
-        # Save final scan data if available
-        if len(self.all_points) > 0:
-            final_filename = os.path.join(
-                self.output_directory,
-                f"scan_{self.scan_timestamp}_final.npy"
-            )
-            np.save(final_filename, self.all_points)
-            print(f"Saved final scan data to {final_filename}")
+        # Save final scan data if available and saving is enabled
+        if self.save_to_file and self.output_filename is not None and len(self.all_points) > 0:
+            np.save(self.output_filename, self.all_points)
+            print(f"Saved final scan session to {self.output_filename}")
+            print(f"Total points collected: {len(self.all_points)}")
+            print(f"Total distance traveled: {self.distance_traveled:.2f}m")
+        elif not self.save_to_file and len(self.all_points) > 0:
+            print(f"Session ended - Total points collected: {len(self.all_points)}")
+            print(f"Total distance traveled: {self.distance_traveled:.2f}m")
+            print("(Saving was disabled - no file created)")
+        else:
+            print("No scan data collected during this session")
         
         print("Vertical LiDAR node cleanup completed")
 

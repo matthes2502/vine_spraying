@@ -24,6 +24,7 @@ setup(
             "pressure_node = my_spray_controller.publish_pressure:main",
             "bno085_node = my_spray_controller.publish_orientation:main",
             "valve_control_node = my_spray_controller.valve_controller:main",
+            "scanner_node = my_spray_controller.leaf_wall_scanner:main",
             "pump_test_node = my_spray_controller.pump_test_node:main",
         ],
     },

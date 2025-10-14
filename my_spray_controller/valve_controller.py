@@ -10,6 +10,27 @@ import threading
 import time
 import struct
 
+''' README
+--> example for first valve with ID 0x101
+- Set flow rate first with sub-address 15=0x0F. 50 % flow with regard to 2^8=255=0x80
+    --> cansend can1 101#0F80
+    --> cyclic: cangen can1 -I 101 -D 0F80 -g 1000 &
+        --> '&' lets cangen run in the background. CTRL-C not possible
+        --> remove '&' to make CTRL-C stop cangen
+    --> killall cangen
+- Within 3 sec choose mode second with sub-address 02=0x02 and set to 126=0x7E
+    --> cansend can1 103#027E
+- Set system pressure for all valves with ID 0x002 
+    --> DLC = 2
+    --> Byte 0: low byte in mbar
+    --> Byte 1: high byte in mbar 
+    --> example: cansend can1 002#D007 for 2000 mbar = 0x7D0 = 0x07D0
+
+- For testing:
+    - killall cangen; for id in 101 102 103; do cangen can1 -I $id -D 0F00 -g 1000 & done
+    - for id in 101 102 103; do cansend can1 ${id}#027E; done
+'''
+
 class ValveControlNode(Node):
     def __init__(self):
         super().__init__('valve_control_node')

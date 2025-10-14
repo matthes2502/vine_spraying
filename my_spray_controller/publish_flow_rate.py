@@ -13,7 +13,7 @@ class FlowSensorNode(Node):
         super().__init__('flow_sensor_node')
         
         # ROS2 Parameters
-        self.declare_parameter('flow_gpio_pin', 24)
+        self.declare_parameter('flow_gpio_pin', 23)
         self.declare_parameter('publish_rate', 2.0)  # Hz
         
         gpio_pin = self.get_parameter('flow_gpio_pin').get_parameter_value().integer_value

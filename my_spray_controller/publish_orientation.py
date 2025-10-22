@@ -16,10 +16,10 @@ class BNO085Node(Node):
         super().__init__('bno085_node')
         
         # ROS2 Parameters
-        self.declare_parameter('publish_rate', 10.0)  # Hz
+        self.declare_parameter('publish_orientation_rate', 10.0)  # Hz
         self.declare_parameter('i2c_address', 0x4A)   # Default BNO085 address
         
-        publish_rate = self.get_parameter('publish_rate').get_parameter_value().double_value
+        publish_orientation_rate = self.get_parameter('publish_orientation_rate').get_parameter_value().double_value
         i2c_address = self.get_parameter('i2c_address').get_parameter_value().integer_value
         
         # Flag for shutdown request
@@ -65,14 +65,14 @@ class BNO085Node(Node):
         )
         
         # Timer for publishing IMU data
-        self.timer = self.create_timer(1.0 / publish_rate, self.publish_imu_data)
+        self.timer = self.create_timer(1.0 / publish_orientation_rate, self.publish_imu_data)
         
         # Start calibration process
         self.get_logger().info("Starting sensor calibration - please keep sensor still...")
         self.start_calibration()
         
         self.get_logger().info(f'BNO085 Node started')
-        self.get_logger().info(f'Publishing Rate: {publish_rate} Hz')
+        self.get_logger().info(f'Publishing Rate: {publish_orientation_rate} Hz')
         
     def quaternion_to_euler(self, quat_i, quat_j, quat_k, quat_real):
         """
@@ -204,7 +204,7 @@ class BNO085Node(Node):
     def stop_callback(self, msg):
         """Callback for stop signal"""
         if msg.data:
-            self.get_logger().info("Stop signal received → shutting down node.")
+            print("Stop signal received → shutting down node.")
             # Stop timer and release resources
             if hasattr(self, 'timer'):
                 self.destroy_timer(self.timer)
@@ -224,14 +224,16 @@ def main(args=None):
             rclpy.spin_once(bno085_node, timeout_sec=0.1)
         
     except KeyboardInterrupt:
-        pass
+        print("")
+        print("Ctrl-C received. Shutting down node.")
     except Exception as e:
         print(f"Error: {e}")
     finally:
         # Cleanup
         if bno085_node is not None:
             bno085_node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

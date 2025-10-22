@@ -14,10 +14,10 @@ class FlowSensorNode(Node):
         
         # ROS2 Parameters
         self.declare_parameter('flow_gpio_pin', 23)
-        self.declare_parameter('publish_rate', 2.0)  # Hz
+        self.declare_parameter('publish_flow_rate', 2.0)  # Hz
         
         gpio_pin = self.get_parameter('flow_gpio_pin').get_parameter_value().integer_value
-        publish_rate = self.get_parameter('publish_rate').get_parameter_value().double_value
+        publish_flow_rate = self.get_parameter('publish_flow_rate').get_parameter_value().double_value
         
         # Calibration data (Pulse/s -> l/min)
         # From your measurement table: [Pulse [1/s], Flow rate l/min]
@@ -86,12 +86,12 @@ class FlowSensorNode(Node):
         
         # Publisher timer
         self.publish_timer = self.create_timer(
-            1.0 / publish_rate, 
+            1.0 / publish_flow_rate, 
             self.publish_flow_data
         )
         
         self.get_logger().info(f'Flow Sensor Node started on GPIO Pin {gpio_pin}')
-        self.get_logger().info(f'Publishing Rate: {publish_rate} Hz')
+        self.get_logger().info(f'Publishing Rate: {publish_flow_rate} Hz')
         
     def _pulse_callback(self):
         """Callback for each pulse from the sensor"""
@@ -108,7 +108,7 @@ class FlowSensorNode(Node):
                 self.pulse_count = 0  # Reset for next second
         
         # If we reach here, stop_event was set
-        self.get_logger().info("Frequency calculator thread terminated")
+        print("Frequency calculator thread terminated")
     
     def interpolate_flow_rate(self, pulse_frequency):
         """
@@ -186,7 +186,7 @@ class FlowSensorNode(Node):
     
     def stop_sensor(self):
         """Stops the sensor cleanly"""
-        self.get_logger().info("Stopping Flow Sensor...")
+        # print("Stopping Flow Sensor...")
         
         # Set event to stop thread
         self.stop_event.set()  # Wakes up the waiting thread
@@ -197,7 +197,7 @@ class FlowSensorNode(Node):
         if hasattr(self, 'publish_timer'):
             self.publish_timer.cancel()
             
-        self.get_logger().info("Flow Sensor stopped.")
+        print("Flow Sensor stopped.")
     
     def reset_total_pulses(self):
         """Service to reset the total pulse counter (optional)"""
@@ -218,7 +218,8 @@ def main(args=None):
             rclpy.spin_once(flow_sensor_node, timeout_sec=0.1)
         
     except KeyboardInterrupt:
-        pass
+        print("")
+        print("Ctrl-C received. Shutting down node.")
     except Exception as e:
         print(f"Error: {e}")
     finally:
@@ -226,7 +227,8 @@ def main(args=None):
         if flow_sensor_node is not None:
             flow_sensor_node.stop_sensor()
             flow_sensor_node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 if __name__ == '__main__':
     main()

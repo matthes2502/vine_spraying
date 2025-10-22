@@ -15,6 +15,10 @@ class ADS1115Node(Node):
     def __init__(self):
         super().__init__('ads1115_node')
 
+        # Declare parameter for publishing rate
+        self.declare_parameter('publish_pressure_rate', 2.0)  # Hz
+        publish_rate = self.get_parameter('publish_pressure_rate').get_parameter_value().double_value
+
         # I2C setup
         i2c = busio.I2C(board.SCL, board.SDA)
         ads = ADS.ADS1115(i2c, address=0x48)
@@ -25,7 +29,10 @@ class ADS1115Node(Node):
 
         # Publisher for fluid pressure messages
         self.publisher_ = self.create_publisher(FluidPressure, 'pressure', 10)
-        self.timer = self.create_timer(0.5, self.timer_callback)
+        
+        # Create timer with configurable rate
+        timer_period = 1.0 / publish_rate  # Convert Hz to seconds
+        self.timer = self.create_timer(timer_period, self.timer_callback)
 
         self.shutdown_requested = False
 
@@ -33,7 +40,7 @@ class ADS1115Node(Node):
         self.stop_sub = self.create_subscription(Bool, '/peripherie/stop', self.stop_callback, 10)
 
         self.get_logger().info(f'Pressure Sensor Node started on I2C')
-        self.get_logger().info(f'Publishing Rate: 2 Hz')
+        self.get_logger().info(f'Publishing Rate: {publish_rate} Hz')
 
     def timer_callback(self):
         voltage = self.chan.voltage  # Measured voltage (0–3.125 V with ADS1115 at gain=1)
@@ -67,11 +74,13 @@ def main(args=None):
             rclpy.spin_once(pressure_node, timeout_sec=0.1)
 
     except KeyboardInterrupt:
-        pressure_node.get_logger().info("Ctrl-C received → shutting down node.") # type: ignore
+        print("")
+        print("Ctrl-C received. Shutting down node.")
     finally:
         if pressure_node is not None:
             pressure_node.destroy_node()
-        rclpy.shutdown()
+        if rclpy.ok():
+            rclpy.shutdown()
 
 
 if __name__ == '__main__':

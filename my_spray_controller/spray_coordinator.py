@@ -6,6 +6,7 @@ from std_msgs.msg import String, Bool, Float32, Float32MultiArray
 from sensor_msgs.msg import FluidPressure
 from geometry_msgs.msg import Vector3
 from threading import Lock
+import time
 
 class SprayCoordinator(Node):
     def __init__(self):
@@ -18,10 +19,14 @@ class SprayCoordinator(Node):
         self.shutdown_requested = False
         self.data_lock = Lock()
         
+        # VESC initialization
+        self.vesc_ready = False
+        self.vesc_init_start_time = None
+        
         # Sensor data storage
         self.leaf_wall_density = 0.0
         self.flow_rate = 0.0  # L/min
-        self.pressure = 0.0   # Pa
+        self.pressure = 0.0   # bar
         self.orientation = None
         
         # Control parameters (TODO: Calibrate these later)
@@ -53,12 +58,15 @@ class SprayCoordinator(Node):
             Vector3, '/bno085_node/orientation', self.orientation_callback, 10)
         
         # === PUBLISHERS ===
+        # Relay control
+        self.relay_pub = self.create_publisher(String, '/peripherie/relay_control', 10)
+        
         # Actuator control publishers
-        self.pump_speed_pub = self.create_publisher(Float32, '/pump/speed_command', 10)
+        self.pump_speed_pub = self.create_publisher(Float32, '/pump/pwm_command', 10)
         self.propeller_speed_pub = self.create_publisher(Float32, '/propellers/speed_command', 10)
         
         # Single valve control publisher for all valves
-        self.valve_commands_pub = self.create_publisher(Float32MultiArray, '/valves/commands', 10)
+        self.valve_commands_pub = self.create_publisher(Float32MultiArray, '/valve/commands', 10)
         
         # === CONTROL TIMER ===
         # Main control loop - runs at 10Hz
@@ -68,15 +76,31 @@ class SprayCoordinator(Node):
     
     def spray_control_callback(self, msg: String):
         """Handle spray start/pause from Xbox controller"""
+        # MAYBE: also adding relais for inline pump
         with self.data_lock:
             if msg.data == "spray_start":
-                self.spray_enabled = True
-                self.get_logger().info("SPRAY ACTIVATED")
+                if not self.spray_enabled:
+                    # Turn on relay first
+                    relay_msg = String()
+                    relay_msg.data = 'main_pump_on'
+                    self.relay_pub.publish(relay_msg)
+                    self.get_logger().info("SPRAY ACTIVATED - Relay ON, waiting for VESC...")
+                    
+                    # Start VESC initialization
+                    self.vesc_init_start_time = time.time()
+                    self.vesc_ready = False
+                    self.spray_enabled = False  # Will be enabled after VESC init
+                    
             elif msg.data == "spray_pause":
                 self.spray_enabled = False
+                self.vesc_ready = False
                 self.get_logger().info("SPRAY PAUSED")
                 # On pause, immediately stop all actuators
                 self.send_zero_commands()
+                # Turn off relay
+                relay_msg = String()
+                relay_msg.data = 'main_pump_off'
+                self.relay_pub.publish(relay_msg)
     
     def stop_callback(self, msg: Bool):
         """Handle peripherie stop signal"""
@@ -84,7 +108,12 @@ class SprayCoordinator(Node):
             self.get_logger().info("Stop signal received - shutting down spray coordinator.")
             with self.data_lock:
                 self.spray_enabled = False
+                self.vesc_ready = False
             self.send_zero_commands()
+            # Turn off relay
+            relay_msg = String()
+            relay_msg.data = 'main_pump_off'
+            self.relay_pub.publish(relay_msg)
             self.destroy_timer(self.control_timer)
             self.shutdown_requested = True
     
@@ -101,7 +130,7 @@ class SprayCoordinator(Node):
     def pressure_callback(self, msg: FluidPressure):
         """Update pressure from pressure sensor"""
         with self.data_lock:
-            self.pressure = msg.fluid_pressure  # Pa
+            self.pressure = msg.fluid_pressure  # bar
     
     def orientation_callback(self, msg: Vector3):
         """Update orientation from gyroscope (roll, pitch, yaw in degrees)"""
@@ -112,6 +141,19 @@ class SprayCoordinator(Node):
         """Main control loop - calculates and sends new actuator commands"""
         if self.shutdown_requested:
             return
+        
+        # Handle VESC initialization
+        if self.vesc_init_start_time and not self.vesc_ready:
+            if time.time() - self.vesc_init_start_time >= 8.0:  # 3 seconds wait
+                # Send zero signal to VESC
+                zero_msg = Float32()
+                zero_msg.data = 1000.0  # 1000µs = 0%
+                self.pump_speed_pub.publish(zero_msg)
+                
+                self.vesc_ready = True
+                self.spray_enabled = True
+                self.vesc_init_start_time = None
+                self.get_logger().info("VESC ready - Spray enabled")
         
         with self.data_lock:
             if not self.spray_enabled:
@@ -140,26 +182,30 @@ class SprayCoordinator(Node):
         density_factor = min(leaf_density / 100.0, 2.0)  # Normalization
         target_pump_speed = self.base_pump_speed * (0.5 + density_factor)
         target_pump_speed = min(target_pump_speed, self.max_pump_speed)
+        target_pump_speed = 1325.0
         
         # Propeller speed based on pressure and density
         pressure_factor = min(pressure / 100000.0, 1.5)  # 100kPa as baseline
         target_propeller_speed = self.base_propeller_speed * (0.7 + pressure_factor * 0.5)
         target_propeller_speed = min(target_propeller_speed, self.max_propeller_speed)
+        target_propeller_speed = 30.0
         
         # Valve settings (3 valves)
         # TODO: Real calculations based on vehicle speed, wind, etc.
+        # system pressure in mbar is not calculated but only measured
+        # flow percent in 0-100% will be calculated regarding the leaf wall density
         valve_commands = {
             'valve_1': {
-                'pressure_percent': min(50.0 + leaf_density * 0.5, 100.0),
-                'flow_percent': min(30.0 + flow_rate * 2.0, 90.0)
+                'system_pressure': self.pressure,
+                'flow_percent': 70.0
             },
             'valve_2': {
-                'pressure_percent': min(40.0 + leaf_density * 0.4, 100.0),
-                'flow_percent': min(25.0 + flow_rate * 1.8, 85.0)
+                'system_pressure': self.pressure,
+                'flow_percent': 70.0
             },
             'valve_3': {
-                'pressure_percent': min(45.0 + leaf_density * 0.45, 100.0),
-                'flow_percent': min(35.0 + flow_rate * 2.2, 95.0)
+                'system_pressure': self.pressure,
+                'flow_percent': 70.0
             }
         }
         
@@ -168,18 +214,18 @@ class SprayCoordinator(Node):
     def send_actuator_commands(self, pump_speed, propeller_speed, valve_commands):
         """Send commands to all actuators"""
         
-        # Pump speed command
+        # Pump speed command --> in duty cycle (1300-2000µs)
         pump_msg = Float32()
         pump_msg.data = pump_speed
         self.pump_speed_pub.publish(pump_msg)
         
-        # Propeller speed command  
+        # Propeller speed command  --> in percent (0-100%)
         propeller_msg = Float32()
         propeller_msg.data = propeller_speed
         self.propeller_speed_pub.publish(propeller_msg)
         
         # Valve commands - single topic for all valves
-        self.send_valve_commands(valve_commands)
+        self.send_valve_commands(valve_commands)        
         
         # Debug output (every 50 cycles = ~5 seconds)
         if hasattr(self, 'debug_counter'):
@@ -196,17 +242,23 @@ class SprayCoordinator(Node):
     def send_valve_commands(self, valve_commands):
         """
         Send valve commands - single topic for all valves
-        Format: [valve_id, pressure_percent, flow_percent, valve_id, pressure_percent, flow_percent, ...]
+        Format: [valve_id, system_pressure, flow_percent, valve_id, system_pressure, flow_percent, ...]
         """
         try:
-            valve_msg = Float32MultiArray()
+            valve_msg = Float32MultiArray() # pressure in mbar
             valve_msg.data = [
                 # Valve 1
-                1.0, valve_commands['valve_1']['pressure_percent'], valve_commands['valve_1']['flow_percent'],
+                1.0, 
+                float(valve_commands['valve_1']['system_pressure']), 
+                float(valve_commands['valve_1']['flow_percent']),
                 # Valve 2  
-                2.0, valve_commands['valve_2']['pressure_percent'], valve_commands['valve_2']['flow_percent'],
+                2.0, 
+                float(valve_commands['valve_2']['system_pressure']), 
+                float(valve_commands['valve_2']['flow_percent']),
                 # Valve 3
-                3.0, valve_commands['valve_3']['pressure_percent'], valve_commands['valve_3']['flow_percent']
+                3.0, 
+                float(valve_commands['valve_3']['system_pressure']), 
+                float(valve_commands['valve_3']['flow_percent'])
             ]
             self.valve_commands_pub.publish(valve_msg)
                 
@@ -217,8 +269,10 @@ class SprayCoordinator(Node):
         """Send zero commands to all actuators (emergency stop)"""
         # Stop pump and propeller
         zero_msg = Float32()
-        zero_msg.data = 0.0
+        zero_msg.data = 1000.0  # 1000µs = 0% for VESC
         self.pump_speed_pub.publish(zero_msg)
+        
+        zero_msg.data = 0.0
         self.propeller_speed_pub.publish(zero_msg)
         
         # Stop all valves

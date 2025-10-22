@@ -1,4 +1,6 @@
 from setuptools import find_packages, setup
+from glob import glob
+import os
 
 package_name = 'my_spray_controller'
 
@@ -10,6 +12,10 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'launch'), 
+        glob('launch/*.py')),
+        (os.path.join('share', package_name, 'config'), 
+        glob('config/*.rviz')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
@@ -20,13 +26,14 @@ setup(
     tests_require=['pytest'],
     entry_points={
         'console_scripts': [
+            "spray_coordinator_node = my_spray_controller.spray_coordinator:main",
             "flow_sensor_node = my_spray_controller.publish_flow_rate:main",
             "pressure_node = my_spray_controller.publish_pressure:main",
             "bno085_node = my_spray_controller.publish_orientation:main",
             "valve_control_node = my_spray_controller.valve_controller:main",
             "scanner_node = my_spray_controller.leaf_wall_scanner:main",
             "relais_node = my_spray_controller.relais_controller:main",
-            "pump_test_node = my_spray_controller.pump_test_node:main",
+            # "pump_test_node = my_spray_controller.pump_test_node:main",
         ],
     },
 )

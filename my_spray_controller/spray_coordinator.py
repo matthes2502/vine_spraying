@@ -144,7 +144,7 @@ class SprayCoordinator(Node):
         
         # Handle VESC initialization
         if self.vesc_init_start_time and not self.vesc_ready:
-            if time.time() - self.vesc_init_start_time >= 8.0:  # 3 seconds wait
+            if time.time() - self.vesc_init_start_time >= 5.0:  # 3 seconds wait
                 # Send zero signal to VESC
                 zero_msg = Float32()
                 zero_msg.data = 1000.0  # 1000µs = 0%

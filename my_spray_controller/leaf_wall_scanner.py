@@ -32,6 +32,7 @@ class VerticalLidarNode(Node):
         # Parameters
         self.declare_parameter('lidar_height', 1.0)  # Height of lidar above ground
         self.declare_parameter('lateral_distance', 1.2)  # Distance to foliage wall (left/right)
+        self.declare_parameter('wall_detection_tolerance', 0.25)  # Tolerence around foliage wall (left/right)
         self.declare_parameter('grid_height_min', 0.4)  # Minimum height for grid (40cm)
         self.declare_parameter('grid_height_max', 2.0)  # Maximum height for grid (2m)
         self.declare_parameter('grid_length', 0.2)  # Grid length in driving direction (1m)
@@ -42,6 +43,7 @@ class VerticalLidarNode(Node):
         # Get parameters with type casting to ensure they're not None
         lidar_height_param = self.get_parameter('lidar_height').value
         lateral_param = self.get_parameter('lateral_distance').value
+        tolerance_param = self.get_parameter('wall_detection_tolerance').value
         height_min_param = self.get_parameter('grid_height_min').value
         height_max_param = self.get_parameter('grid_height_max').value
         grid_length_param = self.get_parameter('grid_length').value
@@ -52,6 +54,7 @@ class VerticalLidarNode(Node):
         # Ensure parameters are not None before casting
         self.lidar_height = float(lidar_height_param) if lidar_height_param is not None else 1.0
         self.lateral_distance = float(lateral_param) if lateral_param is not None else 1.2
+        self.wall_detection_tolerance = float(tolerance_param) if tolerance_param is not None else 0.25
         self.grid_height_min = float(height_min_param) if height_min_param is not None else 0.4
         self.grid_height_max = float(height_max_param) if height_max_param is not None else 2.0
         self.grid_length = float(grid_length_param) if grid_length_param is not None else 1.0
@@ -74,6 +77,7 @@ class VerticalLidarNode(Node):
         self.laser_frame_id: str = "laser"  # Will be updated from laser scan messages
 
         self.scanning_active: bool = False  # Control scanning state
+        self.wall_detected = False  # Check if leaf wall is within range
 
         self.logger_count = 0  # counter for logging
         
@@ -121,61 +125,86 @@ class VerticalLidarNode(Node):
         self.get_logger().info(f"Grid configuration: {len(self.grid_heights)-1} height zones from {self.grid_height_min}m to {self.grid_height_max}m")
         self.get_logger().info(f"Lateral distance: {self.lateral_distance}m, Grid length: {self.grid_length}m, LiDAR height: {self.lidar_height}m")
     
-    # def create_grid_visualization_points(self) -> np.ndarray:
-    #     """
-    #     Create artificial points to visualize the grid boxes for debugging.
-    #     Creates box outlines for each grid cell on the left side.
-    #     """
-    #     if self.distance_traveled < self.grid_length:
-    #         return np.array([])
+    def create_grid_visualization_points(self) -> np.ndarray:
+        """
+        Create artificial points to visualize the grid boxes for debugging.
+        Creates complete box edges with points every 2cm.
+        """
+        if self.distance_traveled < self.grid_length:
+            return np.array([])
         
-    #     # Grid parameters
-    #     min_x = self.distance_traveled - self.grid_length
-    #     max_x = self.distance_traveled
+        # Grid parameters
+        min_x = self.distance_traveled - self.grid_length
+        max_x = self.distance_traveled
         
-    #     # Left side parameters (positive Y)
-    #     center_y = self.lateral_distance  # Expected wall position
-    #     y_min = center_y - 0.2  # -20cm from wall
-    #     y_max = center_y + 0.2  # +20cm from wall
+        # Left side parameters (positive Y)
+        center_y = self.lateral_distance  # Expected wall position
+        y_min = center_y - 0.25  # -25cm from wall
+        y_max = center_y + 0.25  # +25cm from wall
         
-    #     visualization_points = []
+        visualization_points = []
+        point_spacing = 0.02  # 2cm spacing
         
-    #     # Create points for each height zone
-    #     for i in range(len(self.grid_heights) - 1):
-    #         z_min = self.grid_heights[i]
-    #         z_max = self.grid_heights[i + 1]
+        # Create points for each height zone
+        for i in range(len(self.grid_heights) - 1):
+            z_min = self.grid_heights[i]
+            z_max = self.grid_heights[i + 1]
             
-    #         # Create box outline points (8 corners + some edge points)
-    #         # Bottom rectangle
-    #         box_points = [
-    #             [min_x, y_min, z_min], [max_x, y_min, z_min],  # Bottom front edge
-    #             [max_x, y_max, z_min], [min_x, y_max, z_min],  # Bottom back edge
-    #             # Top rectangle  
-    #             [min_x, y_min, z_max], [max_x, y_min, z_max],  # Top front edge
-    #             [max_x, y_max, z_max], [min_x, y_max, z_max],  # Top back edge
-    #             # Vertical edges (add some intermediate points for better visibility)
-    #             [min_x, y_min, (z_min + z_max) / 2], [max_x, y_min, (z_min + z_max) / 2],
-    #             [max_x, y_max, (z_min + z_max) / 2], [min_x, y_max, (z_min + z_max) / 2],
-    #         ]
+            # 1. Horizontale Kanten (in X-Richtung)
+            x_points = np.arange(min_x, max_x + point_spacing, point_spacing)
             
-    #         visualization_points.extend(box_points)
+            # Untere horizontale Kanten
+            for x in x_points:
+                visualization_points.extend([
+                    [x, y_min, z_min],  # Vordere untere Kante
+                    [x, y_max, z_min],  # Hintere untere Kante
+                ])
+            
+            # Obere horizontale Kanten
+            for x in x_points:
+                visualization_points.extend([
+                    [x, y_min, z_max],  # Vordere obere Kante
+                    [x, y_max, z_max],  # Hintere obere Kante
+                ])
+            
+            # 2. Vertikale Kanten (in Z-Richtung)
+            z_points = np.arange(z_min, z_max + point_spacing, point_spacing)
+            
+            for z in z_points:
+                visualization_points.extend([
+                    [min_x, y_min, z],  # Linke vordere vertikale Kante
+                    [min_x, y_max, z],  # Linke hintere vertikale Kante
+                    [max_x, y_min, z],  # Rechte vordere vertikale Kante
+                    [max_x, y_max, z],  # Rechte hintere vertikale Kante
+                ])
+            
+            # 3. Seitliche Kanten (in Y-Richtung)
+            y_points = np.arange(y_min, y_max + point_spacing, point_spacing)
+            
+            for y in y_points:
+                visualization_points.extend([
+                    [min_x, y, z_min],  # Linke untere seitliche Kante
+                    [min_x, y, z_max],  # Linke obere seitliche Kante
+                    [max_x, y, z_min],  # Rechte untere seitliche Kante
+                    [max_x, y, z_max],  # Rechte obere seitliche Kante
+                ])
         
-    #     return np.array(visualization_points)
+        return np.array(visualization_points)
 
-    # def add_grid_visualization_to_pointcloud(self, points: np.ndarray) -> np.ndarray:
-    #     """
-    #     Add grid visualization points to the main point cloud for debugging.
-    #     Call this in spray_control_callback before publishing.
-    #     """
-    #     grid_points = self.create_grid_visualization_points()
+    def add_grid_visualization_to_pointcloud(self, points: np.ndarray) -> np.ndarray:
+        """
+        Add grid visualization points to the main point cloud for debugging.
+        Call this in spray_control_callback before publishing.
+        """
+        grid_points = self.create_grid_visualization_points()
         
-    #     if len(grid_points) > 0 and len(points) > 0:
-    #         # Combine real points with visualization points
-    #         combined_points = np.vstack([points, grid_points])
-    #         self.get_logger().info(f"Added {len(grid_points)} grid visualization points")
-    #         return combined_points
-    #     else:
-    #         return points
+        if len(grid_points) > 0 and len(points) > 0:
+            # Combine real points with visualization points
+            combined_points = np.vstack([points, grid_points])
+            self.get_logger().info(f"Added {len(grid_points)} grid visualization points")
+            return combined_points
+        else:
+            return points
     
     def spray_control_callback(self, msg: String):
         """Handle spray control commands to start/stop scanning."""
@@ -194,12 +223,13 @@ class VerticalLidarNode(Node):
         elif command == "spray_pause":
             if self.scanning_active:
                 self.scanning_active = False
+                self.wall_detected = False
                 self.get_logger().info("Scanning PAUSED - session completed")
                 self.get_logger().info(f"Length buffer: {len(self.scan_buffer)}\n\n\n\n\n")
                 self.all_points = np.vstack([points for points, _ in self.scan_buffer])    # Stack buffered points together
                 
                 # Add grid visualization for debugging (remove later!)
-                # points_with_grids = self.add_grid_visualization_to_pointcloud(self.all_points)
+                self.all_points = self.add_grid_visualization_to_pointcloud(self.all_points)
 
                 # Save current session data
                 if len(self.all_points) > 0:
@@ -249,38 +279,38 @@ class VerticalLidarNode(Node):
     
     def scan_callback(self, msg: LaserScan):
         """Process incoming 2D laser scan and accumulate into 3D point cloud."""
+        # Only process scans when scanning is active
+        if not self.scanning_active or self.current_speed == 0.0:
+            return
+        
+        # Wall detection - early return if no wall
+        if not self.wall_detected:
+            self.wall_detected = self.detect_wall_presence(msg)
+            if not self.wall_detected:
+                self.get_logger().info("-----------Nothing within lateral distance range detected--------------")
+                return  # Leave callback if there are no close points available
+            else:
+                self.get_logger().info("Wall detected! Starting grid counting.")
+                self.distance_traveled = 0.0
+                self.last_grid_publish_distance = 0.0
+                
         current_time = self.get_clock().now()
         
         # Store the frame_id from the laser scan for consistency
         self.laser_frame_id = msg.header.frame_id
-
-        # Only process scans when scanning is active
-        if not self.scanning_active:
-            return
                 
         # Calculate distance traveled based on speed and scan rate
-        # Using scan_time from LaserScan message if available, otherwise calculate from timestamps
         if self.last_scan_time is not None and self.current_speed != 0.0:
-            # Option 1: Use scan_time from message (time between scans)
-            if hasattr(msg, 'scan_time') and msg.scan_time > 0:
-                self.get_logger().info("SCAN TIME IN LIDAR")
-                time_delta = msg.scan_time
-            else:
-                # Option 2: Calculate from ROS timestamps
-                self.get_logger().info("SCAN TIME NOT IN LIDAR")
-                time_delta = (current_time - self.last_scan_time).nanoseconds / 1e9
-
-            callback_time_delta = (current_time - self.last_scan_time).nanoseconds / 1e9
             time_delta = (current_time - self.last_scan_time).nanoseconds / 1e9
             
             distance_increment = abs(self.current_speed * time_delta)
             self.distance_traveled += distance_increment
             
             # Log scan rate occasionally for debugging
-            # if self.logger_count == 10:
-            if True:
+            if self.logger_count == 50:
+            # if True:
                 scan_rate = 1.0 / time_delta if time_delta > 0 else 0.0
-                self.get_logger().info(f"Scan rate: {scan_rate:.1f} Hz, Travelled distance: {self.distance_traveled:.2f}m, Current Time: {current_time}, Delta Time: {time_delta}, Callback Time: {callback_time_delta}")
+                self.get_logger().info(f" Delta Time: {time_delta}, Scan rate: {scan_rate:.1f} Hz, Travelled distance: {self.distance_traveled:.2f}m , Distance Increment: {distance_increment}m")
                 self.logger_count = 0
 
             self.logger_count = self.logger_count + 1
@@ -288,7 +318,7 @@ class VerticalLidarNode(Node):
         self.last_scan_time = current_time
         
         # Convert LaserScan to points
-        ranges = np.array(msg.ranges)
+        ranges = np.frombuffer(msg.ranges, dtype=np.float32).copy()
         angles = np.linspace(msg.angle_min, msg.angle_max, len(ranges))
         
         # Filter valid measurements
@@ -304,13 +334,11 @@ class VerticalLidarNode(Node):
         # X: forward (driving direction)
         # Y: lateral (left/right)
         # Z: vertical (up/down)
-        z_points = ranges * np.cos(angles)  # Lateral distance (left/right)
-        y_points = ranges * np.sin(angles) + self.lidar_height  # Vertical position (up/down) corrected for lidar height
+        y_points = - ranges * np.sin(angles) # Lateral distance (left/right)
+        z_points = ranges * np.cos(angles) + self.lidar_height  # Vertical position (up/down) corrected for lidar height
         x_points = np.full_like(y_points, self.distance_traveled)  # Forward position (driving direction)
         
-        points_3d = np.stack((-x_points, y_points, z_points), axis=-1)
-
-        self.get_logger().info(f"-------------------Length Points 3D: {len(points_3d)}--------------------")
+        points_3d = np.stack((x_points, y_points, z_points), axis=-1)
         
         # Add to buffer
         self.scan_buffer.append((points_3d, self.distance_traveled))
@@ -323,7 +351,109 @@ class VerticalLidarNode(Node):
         if self.distance_traveled - self.last_grid_publish_distance >= self.grid_length:
             self.publish_grid_densities()
             self.last_grid_publish_distance = self.distance_traveled
-    
+
+    def calculate_height_zone_indices(self):
+        """Calculate which scan indices correspond to each height zone."""
+        # Calculate angles for height zone boundaries
+        zone_angles = []
+        for height in self.grid_heights:
+            # Calculate angle from lidar to target height at lateral distance
+            height_diff = height - self.lidar_height
+            if height_diff < 0:
+                lowest_idx = (138 - 90 - np.arctan(height_diff/self.actual_lateral_distance) * 180 / np.pi ) * 4
+            angle = np.arctan2(height_diff, self.actual_lateral_distance)
+            zone_angles.append(angle)
+        
+        # Convert angles to scan indices (negative angles for left side)
+        angle_resolution = 0.25 * np.pi / 180  # 0.25 degrees in radians
+        zone_indices = []
+        for angle in zone_angles:
+            # Find closest scan index (negative angle, scanning from top)
+            scan_index = int(round(-angle / angle_resolution))
+            zone_indices.append(scan_index)
+        
+        return zone_indices
+
+    def count_wall_points_by_zone(self, ranges, angles):
+        """Count wall points in each height zone."""
+        if not hasattr(self, 'zone_indices'):
+            self.zone_indices = self.calculate_height_zone_indices()
+        
+        # Convert to lateral distances
+        lateral_distances = ranges * np.sin(-angles)  # Negative angles for left side
+        
+        # Filter for wall detection range
+        wall_mask = (lateral_distances >= self.actual_lateral_distance - self.wall_detection_tolerance) & \
+                    (lateral_distances <= self.actual_lateral_distance + self.wall_detection_tolerance)
+        
+        zone_counts = []
+        for i in range(3):  # 3 height zones
+            # Get index range for this zone
+            start_idx = self.zone_indices[i]
+            end_idx = self.zone_indices[i+1]
+            
+            # Create zone mask
+            zone_mask = np.zeros(len(ranges), dtype=bool)
+            if start_idx < len(ranges) and end_idx < len(ranges):
+                zone_mask[start_idx:end_idx] = True
+            
+            # Count valid wall points in this zone
+            valid_points = wall_mask & zone_mask & np.isfinite(ranges) & (ranges > 0)
+            zone_counts.append(np.sum(valid_points))
+        
+        return zone_counts
+
+    def detect_wall_presence(self, scan: LaserScan) -> bool:
+        """
+        Check for wall at expected distance in horizontal left area (-100° to -80°).
+        """
+        expected_distance = abs(self.lateral_distance)
+        tolerance = 0.15
+        min_distance = expected_distance - tolerance
+        max_distance = expected_distance + tolerance
+
+        # Desired angle window (degrees) and converted to rad for ROS2
+        angle_min_deg = -100.0
+        angle_max_deg = -80.0
+        angle_min_rad = np.deg2rad(angle_min_deg)
+        angle_max_rad = np.deg2rad(angle_max_deg)
+
+        # Compute indices dynamically
+        idx_start = int((angle_min_rad - scan.angle_min) / scan.angle_increment)
+        idx_end   = int((angle_max_rad - scan.angle_min) / scan.angle_increment)
+        idx_start = max(0, idx_start)
+        idx_end   = min(len(scan.ranges), idx_end)
+
+        # Zero-copy: no memory duplication
+        ranges = np.frombuffer(scan.ranges, dtype=np.float32)
+        segment = ranges[idx_start:idx_end]
+
+        # Remove NaN/inf
+        segment = segment[np.isfinite(segment)]
+        if segment.size == 0:
+            return False
+
+        # Check % of values inside tolerance
+        valid_mask = (segment >= min_distance) & (segment <= max_distance)
+        valid_segment = segment[valid_mask]
+        in_band_ratio = len(valid_segment) / len(segment)
+
+
+        # Debug log (optional)
+        # self.get_logger().debug(f"Wall ratio: {in_band_ratio:.2f}")
+
+        if in_band_ratio < 0.5:   # at least 50% in tolerance
+            return False
+
+        # store actual measured average wall distance for live grid
+        self.actual_lateral_distance = float(np.mean(valid_segment))
+
+        self.get_logger().info(
+            f"Wall detected at {self.actual_lateral_distance:.3f} m"
+        )
+
+        return True        
+
     def publish_pointcloud(self, points):
         """Publish the 3D point cloud as PointCloud2 message."""
         if len(points) == 0:
@@ -371,7 +501,7 @@ class VerticalLidarNode(Node):
         min_x = self.distance_traveled - self.grid_length
         # Ensure all_points is a numpy array for indexing
         points_array = np.asarray(self.all_points)
-        grid_points = points_array[points_array[:, 0] >= min_x]  # Changed from [:, 1] to [:, 0]
+        grid_points = points_array[points_array[:, 0] >= min_x]
         
         if len(grid_points) == 0:
             return
@@ -412,7 +542,7 @@ class VerticalLidarNode(Node):
         
         # Filter points near the target lateral distance
         if len(points) > 0:
-            lateral_mask = np.abs(np.abs(points[:, 1]) - abs(target_y)) < lateral_tolerance  # Changed from [:, 0]
+            lateral_mask = np.abs(np.abs(points[:, 1]) - abs(target_y)) < lateral_tolerance
             filtered_points = points[lateral_mask]
         else:
             filtered_points = np.array([])

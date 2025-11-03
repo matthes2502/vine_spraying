@@ -13,11 +13,12 @@ class PointcloudLoader(Node):
         
         # Parameters (from old code - filtering functionality)
         self.declare_parameter('scan_directory', '/home/matthes/Projects/ros2_ws/src/my_spray_controller/lidar_scans')
-        self.declare_parameter('index_from_last', 0)
+        self.declare_parameter('index_from_last', 1)
         self.declare_parameter('filter_left_distance', -1.0)   # -1 = no filter
         self.declare_parameter('filter_right_distance', -1.0)  # -1 = no filter  
         self.declare_parameter('filter_tolerance', 0.3)        # ±30cm tolerance
         self.declare_parameter('center_points', True)          # Enable/disable centering
+        self.declare_parameter('cyclic_publish', True)  # Default: off for comparisons
         
         scan_directory = self.get_parameter('scan_directory').value
         index_from_last = self.get_parameter('index_from_last').value
@@ -25,9 +26,12 @@ class PointcloudLoader(Node):
         self.filter_right_distance = self.get_parameter('filter_right_distance').value
         self.filter_tolerance = self.get_parameter('filter_tolerance').value
         self.center_points = self.get_parameter('center_points').value
+        self.cyclic_publish = self.get_parameter('cyclic_publish').value
         
         # Publisher (using working name from new code)
-        self.publisher_ = self.create_publisher(PointCloud2, '/pointcloud', 10)
+        topic_name = f"/pointcloud_scan_{index_from_last}"
+        self.publisher_ = self.create_publisher(PointCloud2, topic_name, 10)
+        # self.publisher_ = self.create_publisher(PointCloud2, '/pointcloud', 10)
         
         # Load points (using improved loading from new code)
         self.current_points = self.load_pointcloud(scan_directory, index_from_last)
@@ -36,8 +40,12 @@ class PointcloudLoader(Node):
             self.get_logger().info(f"Loaded {len(self.current_points)} points.")
             # First publish
             self.publish_pointcloud()
-            # Timer for cyclic republishing
-            self.timer = self.create_timer(1.0, self.publish_pointcloud)
+            # Timer for cyclic republishing only when needed
+            if self.cyclic_publish:
+                self.timer = self.create_timer(1.0, self.publish_pointcloud)
+                self.get_logger().info("Cyclic publishing enabled")
+            else:
+                self.get_logger().info("One-time publishing only")
         else:
             self.get_logger().error("No valid points found!")
 
@@ -52,7 +60,7 @@ class PointcloudLoader(Node):
                 self.get_logger().error(f"No scan files found in {directory}")
                 return None
             
-            # Sort by modification time (newest first) - from old code
+            # Sort by modification time (newest first)
             files.sort(key=os.path.getmtime, reverse=True)
             
             if index_from_last >= len(files):
@@ -60,7 +68,7 @@ class PointcloudLoader(Node):
                 return None
             
             # Load the requested file
-            selected_file = files[index_from_last]
+            selected_file = files[index_from_last-1]
             self.get_logger().info(f"Loading scan file: {selected_file}")
             
             points = np.load(selected_file)
@@ -72,16 +80,6 @@ class PointcloudLoader(Node):
             
             # Force Float32 (from new code)
             points = points.astype(np.float32)
-            
-            # Center points around origin (from new code) - now optional
-            if self.center_points:
-                mean_x = np.mean(points[:, 0])
-                mean_y = np.mean(points[:, 1])
-                mean_z = np.mean(points[:, 2])
-                points[:, 0] -= mean_x
-                points[:, 1] -= mean_y
-                points[:, 2] -= mean_z
-                self.get_logger().info(f"Centered points: moved by ({mean_x:.2f}, {mean_y:.2f}, {mean_z:.2f})")
             
             # Apply distance filtering (from old code)
             points = self.filter_points_by_distance(points)

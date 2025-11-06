@@ -113,7 +113,7 @@ def generate_launch_description():
                 {'grid_height_max': 2.0},           # Maximum height for grid (2m)
                 {'grid_length': 1.0},               # Grid length in driving direction (1m)
                 {'scan_history_distance': 1000.0},  # Keep last X meters of scans (set very high to keep all)
-                {'save_to_file': True},
+                {'save_to_file': False},
                 {'output_directory': scan_output_path}
             ]
         ),
@@ -147,12 +147,12 @@ def generate_launch_description():
         #     output='screen',
         # ),
 
-        # RViz2 Visualization
-        Node(
-            package='rviz2',
-            executable='rviz2',
-            name='rviz2',
-            output='screen',
-            arguments=['-d', rviz_config_path],
-        ),
+        # # RViz2 Visualization
+        # Node(
+        #     package='rviz2',
+        #     executable='rviz2',
+        #     name='rviz2',
+        #     output='screen',
+        #     arguments=['-d', rviz_config_path],
+        # ),
     ])

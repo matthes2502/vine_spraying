@@ -2,10 +2,11 @@
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import String, Bool, Float32, Float32MultiArray
+from std_msgs.msg import String, Bool, Float32, Float32MultiArray, Int32
 from sensor_msgs.msg import FluidPressure
 from geometry_msgs.msg import Vector3
 from threading import Lock
+import threading
 import time
 
 class SprayCoordinator(Node):
@@ -13,7 +14,11 @@ class SprayCoordinator(Node):
         super().__init__('spray_coordinator')
         
         self.get_logger().info("Spray Coordinator started")
-        
+
+        # Get parameters
+        self.declare_parameter('selected_nozzle', 'orange')
+        selected_nozzle = str(self.get_parameter('selected_nozzle').value)        
+
         # Status variables
         self.spray_enabled = False
         self.shutdown_requested = False
@@ -24,16 +29,72 @@ class SprayCoordinator(Node):
         self.vesc_init_start_time = None
         
         # Sensor data storage
-        self.leaf_wall_density = 0.0
+        self.leaf_wall_density = [0, 0, 0]  # [bottom, middle, top]
         self.flow_rate = 0.0  # L/min
         self.pressure = 0.0   # bar
         self.orientation = None
+
+        # Zone mapping
+        self.zones = ['bottom', 'middle', 'top']
+
+        # Nozzle configuration
+        self.nozzle_pressures = {
+            'orange': 4.9,
+            'grün': 2.2,
+            'lila': 5.4,
+            'blau': 3.8
+        }
+
+        #  Validate nozzle parameter
+        if selected_nozzle not in self.nozzle_pressures:
+            self.get_logger().error(f"Invalid nozzle '{selected_nozzle}'. Valid options: {list(self.nozzle_pressures.keys())}")
+            raise ValueError(f"Invalid nozzle selection: {selected_nozzle}")
+
+        self.target_pressure = self.nozzle_pressures[selected_nozzle]
+        self.get_logger().info(f"Using nozzle: {selected_nozzle} ({self.target_pressure} bar)")
+                
+        # Flag to track if we need to recalculate
+        self.density_updated = False
+        self.last_calculated_params = None
+
+        # Rovo parameters
+        self.rovo_speed = 0.0
+        self.rovo_gear = 0
         
         # Control parameters (TODO: Calibrate these later)
         self.base_pump_speed = 1000  # RPM
         self.base_propeller_speed = 800  # RPM
         self.max_pump_speed = 3000
         self.max_propeller_speed = 2000
+
+        # Calibration tables for valve flow rates
+        # Structure: gear -> zone -> {density_percent: flow_value}
+        self.valve_calibration = {
+            1: {  # Gear 1
+                'bottom': {60: 11545, 100: 22410},
+                'middle': {60: 10583, 100: 22976},
+                'top': {60: 10780, 100: 17457}
+            },
+            2: {  # Gear 2
+                'bottom': {60: 2897, 100: 5949},
+                'middle': {60: 2716, 100: 6099},
+                'top': {60: 2693, 100: 4582}
+            },
+            3: {  # Gear 3
+                'bottom': {60: 1059, 100: 2440},
+                'middle': {60: 1055, 100: 2549},
+                'top': {60: 1070, 100: 1928}
+            }
+        }
+        
+        # Pump calibration table
+        # Structure: {pressure: {density_percent: duty_cycle}}
+        self.pump_calibration = {
+            4.9: {50: 1319, 60: 1321, 70: 1325, 80: 1328, 90: 1331, 100: 1334},
+            2.2: {50: 1240, 60: 1245, 70: 1249, 80: 1253, 90: 1257, 100: 1262},
+            5.4: {50: 1395, 60: 1405, 70: 1417, 80: 1430, 90: 1443, 100: 1458},
+            3.8: {50: 1341, 60: 1357, 70: 1372, 80: 1390, 90: 1411, 100: 1422}  # Assuming 2.2 for 3.8 row
+        }
         
         # === SUBSCRIBERS ===
         # Spray control from Xbox controller
@@ -43,6 +104,14 @@ class SprayCoordinator(Node):
         # Peripherie stop signal
         self.peripherie_stop_sub = self.create_subscription(
             Bool, '/peripherie/stop', self.stop_callback, 10)
+        
+        # Rovo speed subscriber
+        self.speed_sub = self.create_subscription(
+            Float32, '/rovo/speed', self.rovo_speed_callback, 10)
+        
+        # Rovo gear subscriber
+        self.gear_sub = self.create_subscription(
+            Int32, '/rovo/gear', self.rovo_gear_callback, 10)
         
         # Sensor data subscriptions
         self.leaf_density_sub = self.create_subscription(
@@ -117,11 +186,28 @@ class SprayCoordinator(Node):
             self.destroy_timer(self.control_timer)
             self.shutdown_requested = True
     
-    def leaf_density_callback(self, msg: Float32):
+    def rovo_speed_callback(self, msg: Float32):
         """Update leaf wall density from lidar processing"""
         with self.data_lock:
-            self.leaf_wall_density = msg.data
+            self.rovo_speed = msg.data
+
+    def rovo_gear_callback(self, msg: Int32):
+        """Update leaf wall density from lidar processing"""
+        with self.data_lock:
+            self.rovo_gear = msg.data
     
+    def leaf_density_callback(self, msg):
+        """Update leaf wall density from lidar processing"""
+        with self.data_lock:
+            if len(msg.data) >= 3:
+                self.leaf_wall_density = [msg.data[0], msg.data[1], msg.data[2]]
+                self.density_updated = True
+
+        # Calculate new parameters and send commands
+            if self.spray_enabled:
+                pump_speed, propeller_speed, valve_commands = self.calculate_spray_parameters(self.leaf_wall_density)
+                self.send_actuator_commands(pump_speed, propeller_speed, valve_commands)
+
     def flow_rate_callback(self, msg: Float32):
         """Update flow rate from flow sensor"""
         with self.data_lock:
@@ -136,16 +222,151 @@ class SprayCoordinator(Node):
         """Update orientation from gyroscope (roll, pitch, yaw in degrees)"""
         with self.data_lock:
             self.orientation = msg
-    
+
+    def linear_interpolate(self, x, x1, y1, x2, y2):
+        """Linear interpolation between two points"""
+        if x1 == x2:
+            return y1
+        return y1 + (x - x1) * (y2 - y1) / (x2 - x1)
+
+    def calculate_density_percentage(self, measured_points, gear, zone):
+        """Calculate density percentage from measured LiDAR points"""
+        if gear not in self.valve_calibration:
+            self.get_logger().error(f"Invalid gear: {gear}")
+            return 0.0
+            
+        if zone not in self.valve_calibration[gear]:
+            self.get_logger().error(f"Invalid zone: {zone}")
+            return 0.0
+            
+        calibration_data = self.valve_calibration[gear][zone]
+        
+        # Get calibration points
+        points_60 = calibration_data[60]
+        points_100 = calibration_data[100]
+        
+        # Always do linear interpolation first
+        density_percent = self.linear_interpolate(
+            measured_points, points_60, 60.0, points_100, 100.0
+        )
+        
+        # Apply limits after interpolation
+        if density_percent > 100:
+            return 100.0
+        elif density_percent < 50:  # Use 50% as minimum threshold
+            return 0.0
+        else:
+            return density_percent
+
+    def interpolate_valve_flow_percent(self, density_percent):
+        """Convert density percentage to valve flow percentage"""
+        # Simple linear mapping: density% = flow%
+        # You can adjust this if needed
+        return min(100.0, max(0.0, density_percent))
+
+    def interpolate_pump_duty(self, avg_density_percent):
+        """Interpolate pump duty cycle based on average density and current pressure"""
+        # Find closest pressure value
+        calibration_data = self.pump_calibration[self.target_pressure]
+        
+        # Clamp density to valid range
+        avg_density_percent = max(50, min(100, avg_density_percent))
+        
+        # If exact match exists
+        if avg_density_percent in calibration_data:
+            return calibration_data[avg_density_percent]
+        
+        # Find surrounding points for interpolation
+        densities = sorted(calibration_data.keys())
+        
+        # Find the two closest points
+        lower_density = None
+        upper_density = None
+        
+        for density in densities:
+            if density <= avg_density_percent:
+                lower_density = density
+            if density >= avg_density_percent and upper_density is None:
+                upper_density = density
+                break
+        
+        if lower_density is None:
+            return calibration_data[densities[0]]
+        if upper_density is None:
+            return calibration_data[densities[-1]]
+        if lower_density == upper_density:
+            return calibration_data[lower_density]
+        
+        # Linear interpolation
+        return self.linear_interpolate(
+            avg_density_percent,
+            lower_density, calibration_data[lower_density],
+            upper_density, calibration_data[upper_density]
+        )
+
+    def calculate_spray_parameters(self, density):
+        """Calculate spray parameters based on current density and sensor data
+        Returns [pump_speed, propeller_speed, valve_commands]
+        """
+        if not density or len(density) < 3:
+            self.get_logger().warning("Invalid density data")
+            return 1000.0, 0.0, self.get_default_valve_commands()
+        
+        # Convert raw LiDAR point counts to density percentages
+        density_percentages = []
+        for i, measured_points in enumerate(density):
+            zone = self.zones[i]
+            density_percent = self.calculate_density_percentage(
+                measured_points, self.rovo_gear, zone
+            )
+            density_percentages.append(density_percent)
+        
+        # Calculate valve flow percentages for each zone
+        valve_commands = {}
+        for i, density_percent in enumerate(density_percentages):
+            # Convert density percentage to flow percentage
+            flow_percent = self.interpolate_valve_flow_percent(density_percent)
+            
+            valve_commands[f'valve_{i+1}'] = {
+                'system_pressure': self.pressure,
+                'flow_percent': flow_percent
+            }
+        
+        # Calculate pump speed based on average density
+        avg_density = sum(density_percentages) / len(density_percentages)
+        target_pump_duty = self.interpolate_pump_duty(avg_density)
+        
+        # Convert duty cycle to VESC range (1000-2000)
+        target_pump_speed = target_pump_duty
+        
+        # Propeller speed (not used in your current setup)
+        propeller_speed = 0.0
+        
+        self.get_logger().info(
+            f"Gear: {self.rovo_gear}, Points: {density}, "
+            f"Densities: {[f'{d:.1f}%' for d in density_percentages]}, "
+            f"Avg: {avg_density:.1f}%, Pump: {target_pump_speed}, "
+            f"Valve flows: {[f'{cmd['flow_percent']:.1f}%' for cmd in valve_commands.values()]}"
+        )
+        
+        return target_pump_speed, propeller_speed, valve_commands
+
+    def get_default_valve_commands(self):
+        """Return default valve commands when no valid density data"""
+        return {
+            'valve_1': {'system_pressure': self.pressure, 'flow_percent': 0.0},
+            'valve_2': {'system_pressure': self.pressure, 'flow_percent': 0.0},
+            'valve_3': {'system_pressure': self.pressure, 'flow_percent': 0.0}
+        }
+
     def control_loop(self):
-        """Main control loop - calculates and sends new actuator commands"""
+        """Optimized control loop - only recalculates when density changes"""
         if self.shutdown_requested:
             return
         
         # Handle VESC initialization
         if self.vesc_init_start_time and not self.vesc_ready:
-            if time.time() - self.vesc_init_start_time >= 5.0:  # 3 seconds wait
-                # Send zero signal to VESC
+            if time.time() - self.vesc_init_start_time >= 5.0:
                 zero_msg = Float32()
                 zero_msg.data = 1000.0  # 1000µs = 0%
                 self.pump_speed_pub.publish(zero_msg)
@@ -153,63 +374,7 @@ class SprayCoordinator(Node):
                 self.vesc_ready = True
                 self.spray_enabled = True
                 self.vesc_init_start_time = None
-                self.get_logger().info("VESC ready - Spray enabled")
-        
-        with self.data_lock:
-            if not self.spray_enabled:
-                return  # If spray disabled, do nothing
-            
-            # Copy current sensor data for calculations
-            density = self.leaf_wall_density
-            flow = self.flow_rate
-            pressure = self.pressure
-        
-        # === CALCULATION LOGIC (TODO: Implement real algorithms) ===
-        pump_speed, propeller_speed, valve_commands = self.calculate_spray_parameters(
-            density, flow, pressure)
-        
-        # === SEND COMMANDS ===
-        self.send_actuator_commands(pump_speed, propeller_speed, valve_commands)
-    
-    def calculate_spray_parameters(self, leaf_density, flow_rate, pressure):
-        """
-        Calculate optimal spray parameters based on sensor data
-        TODO: Implement real calculation algorithms
-        """
-        # PLACEHOLDER CALCULATIONS
-        
-        # Pump speed based on leaf wall density
-        density_factor = min(leaf_density / 100.0, 2.0)  # Normalization
-        target_pump_speed = self.base_pump_speed * (0.5 + density_factor)
-        target_pump_speed = min(target_pump_speed, self.max_pump_speed)
-        target_pump_speed = 1325.0
-        
-        # Propeller speed based on pressure and density
-        pressure_factor = min(pressure / 100000.0, 1.5)  # 100kPa as baseline
-        target_propeller_speed = self.base_propeller_speed * (0.7 + pressure_factor * 0.5)
-        target_propeller_speed = min(target_propeller_speed, self.max_propeller_speed)
-        target_propeller_speed = 30.0
-        
-        # Valve settings (3 valves)
-        # TODO: Real calculations based on vehicle speed, wind, etc.
-        # system pressure in mbar is not calculated but only measured
-        # flow percent in 0-100% will be calculated regarding the leaf wall density
-        valve_commands = {
-            'valve_1': {
-                'system_pressure': self.pressure,
-                'flow_percent': 70.0
-            },
-            'valve_2': {
-                'system_pressure': self.pressure,
-                'flow_percent': 70.0
-            },
-            'valve_3': {
-                'system_pressure': self.pressure,
-                'flow_percent': 70.0
-            }
-        }
-        
-        return target_pump_speed, target_propeller_speed, valve_commands
+                self.get_logger().info("VESC ready - Spray enabled")                
     
     def send_actuator_commands(self, pump_speed, propeller_speed, valve_commands):
         """Send commands to all actuators"""

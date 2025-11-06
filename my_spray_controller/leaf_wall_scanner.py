@@ -81,10 +81,12 @@ class LeafWallLidarNode(Node):
         self.distance_traveled: float = 0.0  # Total distance traveled
         self.last_grid_publish_distance: float = 0.0  # Distance at last grid publish
         self.laser_frame_id: str = "laser"  # Will be updated from laser scan messages
-        self.actual_lateral_distance: float = 0.0  # will be updated in detect_wall_presence with actual value
+        self.actual_lateral_distance: Optional[float] = None  # will be updated in detect_wall_presence with actual value
 
         self.scanning_active: bool = False  # Control scanning state
         self.wall_detected = False  # Check if leaf wall is within range
+        self.initial_wall_detection_done = False  # Just check for existance of leafwall at the beginning
+        self.indices_calculated = False  # Check if indices have been already calculated
 
         self.logger_count = 0  # counter for logging
         
@@ -148,6 +150,7 @@ class LeafWallLidarNode(Node):
         num_columns = int(self.distance_traveled)
         
         # Left side parameters (positive Y)
+        assert self.actual_lateral_distance is not None, "Wall distance should be measured by now"
         center_y = self.actual_lateral_distance  # Expected wall position
         y_min = center_y - 0.25  # -25cm from wall
         y_max = center_y + 0.25  # +25cm from wall
@@ -228,10 +231,14 @@ class LeafWallLidarNode(Node):
         if command == "spray_start":
             if not self.scanning_active:
                 self.scanning_active = True
+                self.indices_calculated = False  # Calibrate new indices
+                self.wall_detected = False  # Reset wall detection
+                self.actual_lateral_distance = None
+                self.initial_wall_detection_done = False
                 # Clear previous session data
                 self.scan_buffer.clear()
                 self.all_points = np.array([])
-                self.last_grid_publish_distance = self.distance_traveled
+                self.last_grid_publish_distance = 0.0
                 self.distance_traveled = 0.0 # Reset distance for new session
                 self.get_logger().info("Scanning STARTED - collecting new session")
             
@@ -307,14 +314,8 @@ class LeafWallLidarNode(Node):
         """Update current robot speed from Twist message."""
         self.current_speed = msg.linear.x  # Forward speed in m/s
 
-    def detect_wall_presence(self, scan: LaserScan) -> bool:
-        """
-        Check for wall at expected distance in horizontal left area (-100° to -80°).
-        """
-        expected_distance = abs(self.lateral_distance)
-        min_distance = expected_distance - self.wall_detection_tolerance
-        max_distance = expected_distance + self.wall_detection_tolerance
-
+    def calculate_actual_wall_distance(self, scan: LaserScan) -> Optional[float]:
+        """Extract wall distance calculation as separate function."""
         # Desired angle window (degrees) and converted to rad for ROS2
         angle_min_deg = -100.0
         angle_max_deg = -80.0
@@ -334,42 +335,50 @@ class LeafWallLidarNode(Node):
         # Remove NaN/inf
         segment = segment[np.isfinite(segment)]
         if segment.size == 0:
-            return False
+            self.get_logger().info(f"Segment Size = 0 --> Return with None")
+            return None
+
+        expected_distance = abs(self.lateral_distance)
+        min_distance = expected_distance - self.wall_detection_tolerance
+        max_distance = expected_distance + self.wall_detection_tolerance
 
         # Check % of values inside tolerance
         valid_mask = (segment >= min_distance) & (segment <= max_distance)
         valid_segment = segment[valid_mask]
-        in_band_ratio = len(valid_segment) / len(segment)
+        
+        if not self.initial_wall_detection_done and len(valid_segment) / len(segment) < 0.5:
+            # self.get_logger().info(f"Less than 30% within distance +- tolerance --> Return None")
+            return None
+        
+        # self.get_logger().info(f"Calculated wall distance: {float(np.mean(valid_segment))}")
+        if len(valid_segment) == 0:
+            self.get_logger().info("No valid measurements in tolerance range")
+            return None
+            
+        return float(np.mean(valid_segment))
 
-
-        # Debug log (optional)
-        # self.get_logger().debug(f"Wall ratio: {in_band_ratio:.2f}")
-
-        if in_band_ratio < 0.5:   # at least 50% in tolerance
-            return False
-
-        # store actual measured average wall distance for live grid
-        self.actual_lateral_distance = float(np.mean(valid_segment))
-
-        self.get_logger().info(
-            f"Wall detected at {self.actual_lateral_distance:.3f} m"
-        )
-
-        return True
+    def detect_wall_presence(self, scan: LaserScan) -> bool:
+        """Check for wall at expected distance - simplified version."""
+        distance = self.calculate_actual_wall_distance(scan)
+        if distance is not None:
+            self.actual_lateral_distance = distance
+            self.get_logger().info(f"Wall detected at {self.actual_lateral_distance:.3f} m")
+            return True
+        return False
 
     def calculate_height_zone_indices(self, msg: LaserScan):
         """Calculate which scan indices correspond to each height zone."""
-        if not self.detect_wall_presence(msg):
+        if not self.wall_detected or self.indices_calculated:
             return
 
         # LaserScan data: scan.angle_min, scan.angle_increment, scan.ranges
-        # Angles of each scan
         angles = msg.angle_min + np.arange(len(msg.ranges)//2) * msg.angle_increment
-        # print(f"Angles: {angles*180/np.pi}")
-
-        # Hights of each laser ray at actual_lateral_distance
+        assert self.actual_lateral_distance is not None, "actual_lateral_distance must be set before calculating indices"
         heights = self.lidar_height - self.actual_lateral_distance/np.tan(angles)
-        # print(f"Höhen: {heights}")
+
+        # Reset zone_indices
+        for i in range(len(self.zone_indices)):
+            self.zone_indices[i].clear()
 
         for i, h in enumerate(heights):
             for z in range(len(self.grid_heights)-1):
@@ -377,23 +386,21 @@ class LeafWallLidarNode(Node):
                     self.zone_indices[z].append(i)
                     break
 
-        # Stop subscription
-        if self.initial_scan_sub is not None:
-            self.destroy_subscription(self.initial_scan_sub)
-            self.initial_scan_sub = None
+        self.indices_calculated = True
 
-        self.get_logger().info(f"Hight of zone: 1: {heights[self.zone_indices[0][0]-1]}")
-        for i in range(len(self.zone_indices)):
-            self.get_logger().info(f"Length zone_indices individually: {len(self.zone_indices[i])}")
-            self.get_logger().info(f"Hight zones: [{self.zone_indices[i][0]}; {self.zone_indices[i][-1]}]")
-            self.get_logger().info(f"Hight of zone: {i}: {heights[self.zone_indices[i][-1]]}")
+        # self.get_logger().info(f"Hight of zone: 1: {heights[self.zone_indices[0][0]-1]}")
+        # for i in range(len(self.zone_indices)):
+        #     self.get_logger().info(f"Length zone_indices individually: {len(self.zone_indices[i])}")
+        #     self.get_logger().info(f"Hight zones: [{self.zone_indices[i][0]}; {self.zone_indices[i][-1]}]")
+        #     self.get_logger().info(f"Hight of zone: {i}: {heights[self.zone_indices[i][-1]]}")
    
-    
     def scan_callback(self, msg: LaserScan):
         """Process incoming 2D laser scan and accumulate into 3D point cloud."""
         # Only process scans when scanning is active
         if not self.scanning_active or self.current_speed == 0.0:
             return
+        
+        current_time = self.get_clock().now()
         
         # Wall detection - early return if no wall
         if not self.wall_detected:
@@ -403,11 +410,17 @@ class LeafWallLidarNode(Node):
                 return  # Leave callback if there are no close points available
             else:
                 self.get_logger().info("Wall detected! Starting grid counting.")
+                self.initial_wall_detection_done = True
                 self.distance_traveled = 0.0
                 self.last_grid_publish_distance = 0.0
-                
-        current_time = self.get_clock().now()
-        
+                self.last_scan_time = current_time
+
+        # Calculate indices if not happened before
+        if not self.indices_calculated:
+            self.calculate_height_zone_indices(msg)
+            if not self.indices_calculated:  # Falls Berechnung fehlgeschlagen
+                return
+                        
         # Store the frame_id from the laser scan for consistency
         self.laser_frame_id = msg.header.frame_id
                 
@@ -471,6 +484,18 @@ class LeafWallLidarNode(Node):
             self.publish_grid_densities()
             self.last_grid_publish_distance = self.distance_traveled
             self.get_logger().info(f"Distance Travelled at publish_grid_densities: {self.distance_traveled}")
+
+            new_lateral_distance = self.calculate_actual_wall_distance(msg)
+            self.get_logger().info(f"New lateral distance {new_lateral_distance}m ")
+            if new_lateral_distance is not None and self.actual_lateral_distance is not None:
+                lateral_distance_change = abs(new_lateral_distance - self.actual_lateral_distance)
+                
+                # Rekalibrierung wenn Abstand sich signifikant geändert hat
+                if lateral_distance_change > 0.1:  # 10cm Schwellwert
+                    self.get_logger().info(f"Distance changed by {lateral_distance_change:.3f}m - recalibrating")
+                    self.actual_lateral_distance = new_lateral_distance
+                    self.indices_calculated = False
+                    self.calculate_height_zone_indices(msg)
             
         # Remove old scans outside history window
         while self.scan_buffer and (self.distance_traveled - self.scan_buffer[0][1]) > self.scan_history_distance:

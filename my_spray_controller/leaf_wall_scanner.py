@@ -264,7 +264,6 @@ class LeafWallLidarNode(Node):
                 if len(self.all_points) > 0:
                     self.publish_pointcloud(self.all_points)   # Optional: publish before saving
                     self.save_scan_data(self.all_points)
-                    self.get_logger().info(f"Saved session with {len(self.all_points)} points")
                 else:
                     self.get_logger().warning("No points to save for this session")
 
@@ -486,7 +485,7 @@ class LeafWallLidarNode(Node):
             self.get_logger().info(f"Distance Travelled at publish_grid_densities: {self.distance_traveled}")
 
             new_lateral_distance = self.calculate_actual_wall_distance(msg)
-            self.get_logger().info(f"New lateral distance {new_lateral_distance}m ")
+            # self.get_logger().info(f"New lateral distance {new_lateral_distance}m ")
             if new_lateral_distance is not None and self.actual_lateral_distance is not None:
                 lateral_distance_change = abs(new_lateral_distance - self.actual_lateral_distance)
                 
@@ -535,7 +534,7 @@ class LeafWallLidarNode(Node):
 
         # Store in history
         self.grid_density_history.append(self.grid_zone_counts.copy())
-        self.get_logger().info(f"----------------Grid Densities: {self.grid_zone_counts}------------")
+        # self.get_logger().info(f"----------------Grid Densities: {self.grid_zone_counts}------------")
 
         # Reset for next grid
         self.grid_zone_counts = [0] * (len(self.grid_heights)-1)

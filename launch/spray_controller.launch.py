@@ -59,46 +59,46 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # # Flow Sensor Node
-        # Node(
-        #     package='my_spray_controller',
-        #     executable='flow_sensor_node',
-        #     name='flow_sensor_node',
-        #     output='screen',
-        #     parameters=[
-        #         {'publish_flow_rate': 2.0}
-        #     ]
-        # ),
+        # Flow Sensor Node
+        Node(
+            package='my_spray_controller',
+            executable='flow_sensor_node',
+            name='flow_sensor_node',
+            output='screen',
+            parameters=[
+                {'publish_flow_rate': 2.0}
+            ]
+        ),
 
-        # # Pressure Node
-        # Node(
-        #     package='my_spray_controller',
-        #     executable='pressure_node',
-        #     name='pressure_node',
-        #     output='screen',
-        #     parameters=[
-        #         {'publish_pressure_rate': 2.0}
-        #     ]
-        # ),
+        # Pressure Node
+        Node(
+            package='my_spray_controller',
+            executable='pressure_node',
+            name='pressure_node',
+            output='screen',
+            parameters=[
+                {'publish_pressure_rate': 2.0}
+            ]
+        ),
 
-        # # BNO085 IMU Node
-        # Node(
-        #     package='my_spray_controller',
-        #     executable='bno085_node',
-        #     name='bno085_node',
-        #     output='screen',
-        #     parameters=[
-        #         {'publish_orientation_rate': 2.0}
-        #     ]
-        # ),
+        # BNO085 IMU Node
+        Node(
+            package='my_spray_controller',
+            executable='bno085_node',
+            name='bno085_node',
+            output='screen',
+            parameters=[
+                {'publish_orientation_rate': 2.0}
+            ]
+        ),
 
-        # # Valve Control Node
-        # Node(
-        #     package='my_spray_controller',
-        #     executable='valve_control_node',
-        #     name='valve_control_node',
-        #     output='screen',
-        # ),
+        # Valve Control Node
+        Node(
+            package='my_spray_controller',
+            executable='valve_control_node',
+            name='valve_control_node',
+            output='screen',
+        ),
 
         # Scanner Node (Lidar)
         Node(

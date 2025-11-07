@@ -35,7 +35,7 @@ class ValveControlNode(Node):
     # Configuration constants
     INITIAL_FLOW_PERCENT = 0.0  # Change this to 0.0 (closed) or 100.0 (open)
     VALVE_MODE = 0x7E  # Mode stays constant
-    CYCLE_TIME_SEC = 1.0  # 500ms cycle time for flow updates
+    CYCLE_TIME_SEC = 0.05  # 50ms cycle time for flow updates
     
     def __init__(self):
         super().__init__('valve_control_node')
@@ -186,6 +186,7 @@ class ValveControlNode(Node):
     
     def valve_commands_callback(self, msg: Float32MultiArray):
         """Process incoming valve commands"""
+        self.get_logger().info(f"VALVE COMMANDS RECEIVED at {time.time()}")
         try:
             data = msg.data
             

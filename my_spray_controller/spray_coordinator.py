@@ -6,8 +6,11 @@ from std_msgs.msg import String, Bool, Float32, Float32MultiArray, Int32, Int32M
 from sensor_msgs.msg import FluidPressure
 from geometry_msgs.msg import Vector3, Twist
 from threading import Lock
+from typing import Dict, Tuple, List, Optional, Any
 import threading
 import time
+from datetime import datetime
+import os
 
 class SprayCoordinator(Node):
     def __init__(self):
@@ -16,7 +19,7 @@ class SprayCoordinator(Node):
         self.get_logger().info("Spray Coordinator started")
 
         # Get parameters
-        self.declare_parameter('selected_nozzle', 'orange')
+        self.declare_parameter('selected_nozzle', 'blue')
         selected_nozzle = str(self.get_parameter('selected_nozzle').value)        
 
         # Status variables
@@ -34,15 +37,18 @@ class SprayCoordinator(Node):
         self.pressure = 0.0   # bar
         self.orientation = None
 
+        self.pressure_log = []  # [(timestamp, pressure), ...]
+        self.pump_running = False
+
         # Zone mapping
         self.zones = ['bottom', 'middle', 'top']
 
         # Nozzle configuration
         self.nozzle_pressures = {
             'orange': 4.9,
-            'grün': 2.2,
-            'lila': 5.4,
-            'blau': 3.8
+            'green': 2.2,
+            'purple': 5.4,
+            'blue': 3.8
         }
 
         #  Validate nozzle parameter
@@ -59,12 +65,6 @@ class SprayCoordinator(Node):
 
         # Rovo parameters
         self.rovo_speed = 0.0
-        
-        # Control parameters (TODO: Calibrate these later)
-        self.base_pump_speed = 1000  # RPM
-        self.base_propeller_speed = 800  # RPM
-        self.max_pump_speed = 3000
-        self.max_propeller_speed = 2000
 
         # Leaf density calibration (points at different speeds and densities)
         self.density_calibration = {
@@ -116,7 +116,7 @@ class SprayCoordinator(Node):
             Float32, '/flow_sensor_node/flow_rate_l_per_min', self.flow_rate_callback, 10)
         
         self.pressure_sub = self.create_subscription(
-            FluidPressure, '/pressure_node/pressure', self.pressure_callback, 10)
+            FluidPressure, '/pressure', self.pressure_callback, 10)
         
         self.orientation_sub = self.create_subscription(
             Vector3, '/bno085_node/orientation', self.orientation_callback, 10)
@@ -170,10 +170,13 @@ class SprayCoordinator(Node):
         """Handle peripherie stop signal"""
         if msg.data:
             self.get_logger().info("Stop signal received - shutting down spray coordinator.")
+            stop_receive_time = datetime.now()
+            self.get_logger().info(f"=== STOP RECEIVED AT: {stop_receive_time.strftime('%H:%M:%S.%f')[:-3]} ===")
             with self.data_lock:
                 self.spray_enabled = False
                 self.vesc_ready = False
             self.send_zero_commands()
+            self.save_pressure_data()  # Save pressure
             # Turn off relay
             relay_msg = String()
             relay_msg.data = 'main_pump_off'
@@ -189,11 +192,19 @@ class SprayCoordinator(Node):
     def leaf_density_callback(self, msg):
         """Update leaf wall density from lidar processing"""
         with self.data_lock:
+            # Received leaf wall data for the first time
+            if not self.pump_running:
+                self.pump_running = True
+                self.get_logger().info("First vegetation data received - Starting pressure logging")
+            
             if len(msg.data) >= 3:
                 self.leaf_wall_density = [msg.data[0], msg.data[1], msg.data[2]]
                 self.density_updated = True
 
-            # Calculate new parameters and send commands
+            density_receive_time = datetime.now()
+            self.get_logger().info(f"=== DENSITIES RECEIVED AT: {density_receive_time.strftime('%H:%M:%S.%f')[:-3]} ===")
+
+             # Calculate new parameters and send commands
             if self.spray_enabled:
                 pump_speed, propeller_speed, valve_commands = self.calculate_spray_parameters(self.leaf_wall_density)
                 self.send_actuator_commands(pump_speed, propeller_speed, valve_commands)
@@ -338,11 +349,11 @@ class SprayCoordinator(Node):
             upper_density, calibration_data[upper_density]
         )
 
-    def calculate_spray_parameters(self, density):
+    def calculate_spray_parameters(self, density)-> Tuple[float, float, Dict[str, Dict[str, float]]]:
         """Calculate spray parameters based on current density and sensor data
         Returns [pump_speed, propeller_speed, valve_commands]
         """
-        self.get_logger().info(f"\n\n\nCALCULATION OF SPRAY PARAMS \n\n\n")
+        self.get_logger().info(f"\nCALCULATION OF SPRAY PARAMS \n")
 
         if not density or len(density) < 3:
             self.get_logger().warning("Invalid density data")
@@ -373,13 +384,13 @@ class SprayCoordinator(Node):
         target_pump_duty = self.interpolate_pump_duty(avg_density)
         
         # Propeller speed (not used in your current setup)
-        propeller_speed = 0.0
+        propeller_speed = 20.0
 
         # Delete later, just for showcase
         # Map pump duty (1000-2000) to propeller speed (20-70%)
-        pump_range = 1458 - 1240  # 1000
-        propeller_range = 70.0 - 20.0  # 50%
-        propeller_speed = 20.0 + (target_pump_duty - 1240) / pump_range * propeller_range
+        # pump_range = 1458 - 1240  # 1000
+        # propeller_range = 70.0 - 20.0  # 50%
+        # propeller_speed = 20.0 + (target_pump_duty - 1240) / pump_range * propeller_range
         
         valve_flows = [f"{cmd['flow_percent']:.1f}%" for cmd in valve_commands.values()]
         densities_formatted = [f"{d:.1f}%" for d in self.leaf_wall_density]
@@ -391,15 +402,7 @@ class SprayCoordinator(Node):
             f"Valve flows: {valve_flows}"
         )
 
-        # valve_flows = [f"{cmd['flow_percent']:.1f}%" for cmd in valve_commands.values()]
-        # self.get_logger().info(
-        #     f"Current Speed: {self.rovo_speed:.2f}m/s, Points: {density}, "
-        #     f"Densities: {[f'{d:.1f}%' for d in density_percentages]}, "
-        #     f"Avg: {avg_density:.1f}%, Pump: {target_pump_duty}, "
-        #     f"Valve flows: {valve_flows}"
-        # )
-
-        return target_pump_duty, propeller_speed, valve_commands
+        return float(target_pump_duty), float(propeller_speed), valve_commands
 
     def get_default_valve_commands(self):
         """Return default valve commands when no valid density data"""
@@ -424,21 +427,24 @@ class SprayCoordinator(Node):
                 self.vesc_ready = True
                 self.spray_enabled = True
                 self.vesc_init_start_time = None
-                self.get_logger().info("VESC ready - Spray enabled")                
+                self.get_logger().info("VESC ready - Spray enabled") 
+
+        # log pressure only when pump is running
+        if self.vesc_ready and self.pump_running:
+            with self.data_lock:
+                current_time = time.time()
+                self.pressure_log.append((current_time, self.pressure))
     
     def send_actuator_commands(self, pump_speed, propeller_speed, valve_commands):
-        """Send commands to all actuators"""
-
-        self.get_logger().info(f"\n\n\nSEND ACTUATOR COMMANDS\n\n\n")
-        
+        """Send commands to all actuators"""        
         # Pump speed command --> in duty cycle (1300-2000µs)
         pump_msg = Float32()
-        pump_msg.data = pump_speed
+        pump_msg.data = float(pump_speed)
         self.pump_speed_pub.publish(pump_msg)
         
         # Propeller speed command  --> in percent (0-100%)
         propeller_msg = Float32()
-        propeller_msg.data = propeller_speed
+        propeller_msg.data = float(propeller_speed)
         self.propeller_speed_pub.publish(propeller_msg)
         
         # Valve commands - single topic for all valves
@@ -460,6 +466,9 @@ class SprayCoordinator(Node):
         """
         Send valve commands - single topic for all valves
         Format: [valve_id, system_pressure, flow_percent, valve_id, system_pressure, flow_percent, ...]
+        valve_1: bottom
+        valve_2: middle
+        valve_3: top
         """
         try:
             valve_msg = Float32MultiArray() # pressure in mbar
@@ -503,6 +512,23 @@ class SprayCoordinator(Node):
         
         self.get_logger().info("All actuators stopped")
 
+    def save_pressure_data(self):
+        """Save pressure data to specific directory"""
+        if self.pressure_log:
+            # Ordner erstellen falls nicht vorhanden
+            log_dir = "/home/matthes/Projects/ros2_ws/src/my_spray_controller/pressure_logs"
+            os.makedirs(log_dir, exist_ok=True)
+            
+            # Dateiname mit Zeitstempel
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{log_dir}/pressure_log_{timestamp}.csv"
+            
+            with open(filename, "w") as f:
+                f.write("timestamp,pressure_bar\n")
+                for timestamp, pressure in self.pressure_log:
+                    f.write(f"{timestamp:.3f},{pressure:.3f}\n")
+            
+            self.get_logger().info(f"Saved {len(self.pressure_log)} pressure measurements to {filename}")
 
 def main(args=None):
     rclpy.init(args=args)

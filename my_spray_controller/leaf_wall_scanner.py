@@ -35,9 +35,9 @@ class LeafWallLidarNode(Node):
         self.declare_parameter('wall_detection_tolerance', 0.25)  # Tolerence around foliage wall (left/right)
         self.declare_parameter('grid_height_min', 0.4)  # Minimum height for grid (40cm)
         self.declare_parameter('grid_height_max', 2.0)  # Maximum height for grid (2m)
-        self.declare_parameter('grid_length', 0.2)  # Grid length in driving direction (1m)
+        self.declare_parameter('grid_length', 1.03)  # Grid length in driving direction (1m)
         self.declare_parameter('scan_history_distance', 1000.0)  # Keep last X meters of scans (set very high to keep all)
-        self.declare_parameter('save_to_file', False)  # Enable/disable saving to file
+        self.declare_parameter('save_to_file', True)  # Enable/disable saving to file
         self.declare_parameter('scan_output_directory', '/home/matthes/Projects/ros2_ws/src/my_spray_controller/lidar_scans')  # Save in current directory
         
         # Get parameters with type casting to ensure they're not None
@@ -81,12 +81,17 @@ class LeafWallLidarNode(Node):
         self.distance_traveled: float = 0.0  # Total distance traveled
         self.last_grid_publish_distance: float = 0.0  # Distance at last grid publish
         self.laser_frame_id: str = "laser"  # Will be updated from laser scan messages
-        self.actual_lateral_distance: Optional[float] = None  # will be updated in detect_wall_presence with actual value
+        self.actual_lateral_distance: float = abs(self.lateral_distance)  # will be updated in detect_wall_presence with actual value
+        self.lidar_nozzle_offset = 1.5  # Meter distance from LiDAR to nozzles
+        self.pending_grid_publishes = deque()  # (grid_data, target_distance)
 
         self.scanning_active: bool = False  # Control scanning state
         self.wall_detected = False  # Check if leaf wall is within range
         self.initial_wall_detection_done = False  # Just check for existance of leafwall at the beginning
         self.indices_calculated = False  # Check if indices have been already calculated
+        self.lost_wall = False  # For later checking if wall was lost while spraying
+        self.lost_wall_counter: int = 0
+        self.lost_wall_forever = False  # If lost_wall_count > 5 it is assumed that there is no wall anymore --> spray pause
 
         self.logger_count = 0  # counter for logging
         
@@ -94,7 +99,6 @@ class LeafWallLidarNode(Node):
         self.scan_buffer: Deque[Tuple[np.ndarray, float]] = deque()  # Store (points, y_position) tuples
         self.all_points: np.ndarray = np.array([])  # Current accumulated points
         self.grid_density_history = []
-
         
         # File handling
         self.output_filename: Optional[str] = ""
@@ -119,12 +123,14 @@ class LeafWallLidarNode(Node):
         self.grid_right_publisher = self.create_publisher(
             Int32MultiArray, '/grid_density/right', 10
         )
+        self.spray_control_publisher = self.create_publisher(
+            String, '/spray_control', 10)
         
         # Subscribers
         self.scan_subscriber = self.create_subscription(
             LaserScan, '/picoScan_25420273/scan/all_segments_echo0', self.scan_callback, 10
         )
-        self.spray_subscriber = self.create_subscription(
+        self.spray_control_subscriber = self.create_subscription(
             String, '/spray_control', self.spray_control_callback, 10
         )
         self.speed_subscriber = self.create_subscription(
@@ -233,8 +239,11 @@ class LeafWallLidarNode(Node):
                 self.scanning_active = True
                 self.indices_calculated = False  # Calibrate new indices
                 self.wall_detected = False  # Reset wall detection
-                self.actual_lateral_distance = None
+                self.actual_lateral_distance = self.lateral_distance
                 self.initial_wall_detection_done = False
+                self.lost_wall = False  # Wall not lost yet
+                self.lost_wall_counter = 0
+                self.lost_wall_forever = False
                 # Clear previous session data
                 self.scan_buffer.clear()
                 self.all_points = np.array([])
@@ -247,31 +256,32 @@ class LeafWallLidarNode(Node):
                 self.scanning_active = False
                 self.wall_detected = False
                 self.get_logger().info("Scanning PAUSED - session completed")
-                self.get_logger().info(f"Type buffer: {type(self.scan_buffer)}")
-                self.get_logger().info(f"Length buffer: {len(self.scan_buffer)}")
-                self.all_points = np.vstack([points for points, _ in self.scan_buffer])    # Stack buffered points together
-                
-                # Add grid visualization for debugging (remove later!)
-                self.all_points = self.add_grid_visualization_to_pointcloud(self.all_points)
+                # Check if buffer contains data before processing
+                if self.scan_buffer:  # Check if buffer is not empty
+                    self.all_points = np.vstack([points for points, _ in self.scan_buffer])
+                    
+                    # Add grid visualization for debugging (remove later!)
+                    self.all_points = self.add_grid_visualization_to_pointcloud(self.all_points)
 
-                # Save current session data
-                # Generate NEW filename for this session
-                filename = self.generate_daily_filename()
-                self.scan_output_filename = os.path.join(self.scan_output_directory, f"scan_{filename}.npy")
-                self.density_output_filename = os.path.join(self.density_output_directory, f"density_{filename}.npy")
+                    # Generate filename for this session
+                    filename = self.generate_daily_filename()
+                    self.scan_output_filename = os.path.join(self.scan_output_directory, f"scan_{filename}.npy")
+                    self.density_output_filename = os.path.join(self.density_output_directory, f"density_{filename}.csv")
 
-                # Save point cloud if available
-                if len(self.all_points) > 0:
-                    self.publish_pointcloud(self.all_points)   # Optional: publish before saving
+                    # Save point cloud
+                    self.publish_pointcloud(self.all_points)
                     self.save_scan_data(self.all_points)
+                    
+                    # Save grid density history
+                    if self.grid_density_history:
+                        self.save_grid_density_history()
+                    else:
+                        self.get_logger().warning("No grid densities to save for this session")
+                        
                 else:
-                    self.get_logger().warning("No points to save for this session")
-
-                # Save grid density history
-                if self.grid_density_history:
-                    self.save_grid_density_history()
-                else:
-                    self.get_logger().warning("No grid densities to save for this session")
+                    self.get_logger().warning("No scan data collected - buffer is empty. Session paused without saving.")
+                    # Reset any session-specific variables if needed
+                    self.all_points = np.array([])
     
     def generate_daily_filename(self):
         """Generate filename with date and daily incrementing number."""
@@ -316,8 +326,8 @@ class LeafWallLidarNode(Node):
     def calculate_actual_wall_distance(self, scan: LaserScan) -> Optional[float]:
         """Extract wall distance calculation as separate function."""
         # Desired angle window (degrees) and converted to rad for ROS2
-        angle_min_deg = -100.0
-        angle_max_deg = -80.0
+        angle_min_deg = -120.0
+        angle_max_deg = -60.0
         angle_min_rad = np.deg2rad(angle_min_deg)
         angle_max_rad = np.deg2rad(angle_max_deg)
 
@@ -331,30 +341,45 @@ class LeafWallLidarNode(Node):
         ranges = np.frombuffer(scan.ranges, dtype=np.float32)
         segment = ranges[idx_start:idx_end]
 
+        angles = np.linspace(angle_min_rad, angle_max_rad, len(segment))
+
         # Remove NaN/inf
         segment = segment[np.isfinite(segment)]
         if segment.size == 0:
             self.get_logger().info(f"Segment Size = 0 --> Return with None")
             return None
 
-        expected_distance = abs(self.lateral_distance)
+        lateral_distances = np.abs(segment * np.sin(angles))
+
+        expected_distance = abs(self.actual_lateral_distance)
         min_distance = expected_distance - self.wall_detection_tolerance
         max_distance = expected_distance + self.wall_detection_tolerance
 
         # Check % of values inside tolerance
-        valid_mask = (segment >= min_distance) & (segment <= max_distance)
-        valid_segment = segment[valid_mask]
+        valid_mask = (lateral_distances >= min_distance) & (lateral_distances <= max_distance)
+        valid_lateral_distances  = lateral_distances[valid_mask]
         
-        if not self.initial_wall_detection_done and len(valid_segment) / len(segment) < 0.5:
+        if not self.initial_wall_detection_done and len(valid_lateral_distances) / len(segment) < 0.5:
             # self.get_logger().info(f"Less than 30% within distance +- tolerance --> Return None")
             return None
         
-        # self.get_logger().info(f"Calculated wall distance: {float(np.mean(valid_segment))}")
-        if len(valid_segment) == 0:
-            self.get_logger().info("No valid measurements in tolerance range")
+        if len(valid_lateral_distances) == 0:
+            self.get_logger().info(f"Calculate wall distance at {self.distance_traveled:.3f}")
+            self.get_logger().info(f"Lost Wall Counter: {self.lost_wall_counter}")
+            self.lost_wall = True            
             return None
+        
+        else:
+            # only print mean if valid_lateral_distances != 0
+            self.get_logger().info(f"\n\nCalculated wall distance: {float(np.mean(valid_lateral_distances)):.3f} at {self.distance_traveled} \n \
+                        Length of lateral_distances {len(valid_lateral_distances):.3f}\n")
+
+        
+        # if wall is detected (again) --> reset stop-params
+        self.lost_wall = False
+        self.lost_wall_counter = 0
             
-        return float(np.mean(valid_segment))
+        return float(np.mean(valid_lateral_distances))
 
     def detect_wall_presence(self, scan: LaserScan) -> bool:
         """Check for wall at expected distance - simplified version."""
@@ -414,6 +439,18 @@ class LeafWallLidarNode(Node):
                 self.last_grid_publish_distance = 0.0
                 self.last_scan_time = current_time
 
+        if self.lost_wall:
+            if self.lost_wall_counter < 5:
+                self.calculate_actual_wall_distance(msg)
+                self.lost_wall_counter += 1
+                return  # Leave callback if no wall is detected for 5 consecutive scans
+            else:
+                if not self.lost_wall_forever:
+                    self.get_logger().info(f"\n\nNo leaf wall detected while spraying was active at: {self.distance_traveled} m. Sending 'spray_pause' in 1.5 meters")
+                    self.lost_wall_forever = True
+                else:
+                    pass
+
         # Calculate indices if not happened before
         if not self.indices_calculated:
             self.calculate_height_zone_indices(msg)
@@ -434,10 +471,16 @@ class LeafWallLidarNode(Node):
             if self.logger_count == 50:
             # if True:
                 scan_rate = 1.0 / time_delta if time_delta > 0 else 0.0
-                self.get_logger().info(f" Scan rate: {scan_rate:.1f} Hz, Travelled distance: {self.distance_traveled:.2f}m , Distance Increment: {distance_increment}m")
+                self.get_logger().info(f" Scan rate: {scan_rate:.1f} Hz, Traveled distance: {self.distance_traveled:.2f}m")
                 self.logger_count = 0
 
             self.logger_count = self.logger_count + 1
+
+        if self.distance_traveled - self.lidar_nozzle_offset > 6.0:
+            self.get_logger().info(f"Sending 'spray_pause' at lidar position {self.distance_traveled} and nozzle position {self.distance_traveled-self.lidar_nozzle_offset:.2f}m")
+            pause_msg = String()
+            pause_msg.data = "spray_pause"
+            self.spray_control_publisher.publish(pause_msg)
         
         self.last_scan_time = current_time
         
@@ -480,13 +523,23 @@ class LeafWallLidarNode(Node):
             
         # Check if we've traveled enough to publish grid densities
         if self.distance_traveled - self.last_grid_publish_distance >= self.grid_length:
-            self.publish_grid_densities()
+            # Store current grid data for delayed publishing
+            grid_data = self.grid_zone_counts.copy()  # Save current counts
+            target_distance = self.distance_traveled + self.lidar_nozzle_offset - self.grid_length
+            
+            # Add to pending publishes - will publish when nozzles reach this grid
+            self.pending_grid_publishes.append((grid_data, target_distance))
+            
             self.last_grid_publish_distance = self.distance_traveled
-            self.get_logger().info(f"Distance Travelled at publish_grid_densities: {self.distance_traveled}")
+            self.get_logger().info(f"--- [{self.grid_zone_counts}] grid calculated at {self.distance_traveled:.2f}m ---")
+            self.get_logger().info(f"And will publish when nozzles reach {target_distance:.2f}m")
+            
+            # Reset for next grid (this stays the same)
+            self.grid_zone_counts = [0] * (len(self.grid_heights)-1)
 
             new_lateral_distance = self.calculate_actual_wall_distance(msg)
             # self.get_logger().info(f"New lateral distance {new_lateral_distance}m ")
-            if new_lateral_distance is not None and self.actual_lateral_distance is not None:
+            if new_lateral_distance is not None and self.actual_lateral_distance is not None and not self.lost_wall_forever:
                 lateral_distance_change = abs(new_lateral_distance - self.actual_lateral_distance)
                 
                 # Rekalibrierung wenn Abstand sich signifikant geändert hat
@@ -495,7 +548,23 @@ class LeafWallLidarNode(Node):
                     self.actual_lateral_distance = new_lateral_distance
                     self.indices_calculated = False
                     self.calculate_height_zone_indices(msg)
-            
+
+        # Check and publish delayed grid densities when nozzles reach the calculated position
+        if (self.pending_grid_publishes and 
+            self.distance_traveled >= self.pending_grid_publishes[0][1]):
+            grid_data, target_distance = self.pending_grid_publishes.popleft()
+            self.get_logger().info(f"Grid Data at {self.distance_traveled:.2f} is [{grid_data}]")
+    
+            # Check if spraying should be stopped
+            if self.lost_wall_forever and sum(grid_data) == 0:
+                self.get_logger().info(f"Sending 'spray_pause' at lidar position {self.distance_traveled} and nozzle position {self.distance_traveled-self.lidar_nozzle_offset:.2f}m")
+                pause_msg = String()
+                pause_msg.data = "spray_pause"
+                self.spray_control_publisher.publish(pause_msg)
+            else:
+                self.publish_delayed_grid_densities(grid_data)
+                # self.get_logger().info(f"Published delayed grid densities at distance {self.distance_traveled:.2f}m")
+                        
         # Remove old scans outside history window
         while self.scan_buffer and (self.distance_traveled - self.scan_buffer[0][1]) > self.scan_history_distance:
             self.scan_buffer.popleft()
@@ -522,6 +591,30 @@ class LeafWallLidarNode(Node):
             count = np.sum((y_vals >= y_lower) & (y_vals <= y_upper))
             self.grid_zone_counts[z] += count
 
+    def publish_delayed_grid_densities(self, grid_data):
+        """Publish previously calculated grid densities when nozzles reach the grid position."""
+        if not any(grid_data):
+            self.get_logger().warning("No points available for delayed grid density calculation")
+            grid_data = [0, 0, 0]
+
+        # ########## TEMPORARY
+        # if any(grid_data):
+        #     if int(self.distance_traveled) % 2 == 0:
+        #         grid_data = [0, 0, 0]
+        #         self.get_logger().info(f"FULL OFF at {self.distance_traveled:.2f}m")
+        #     else:
+        #         grid_data = [100000, 100000, 100000]
+        #         self.get_logger().info(f"FULL ON at {self.distance_traveled:.2f}m")
+        # ##########
+        
+        msg = Int32MultiArray()
+        msg.data = grid_data  # Use the stored grid data
+        self.grid_left_publisher.publish(msg)
+        
+        # Store in history
+        self.grid_density_history.append(grid_data)
+        self.get_logger().info(f"\n--- Publish delayed Grid Densities: {grid_data} from {(self.distance_traveled-self.lidar_nozzle_offset):.3f} to {(self.distance_traveled-self.lidar_nozzle_offset+self.grid_length):.3f} m at {self.distance_traveled:.3f} m ---\n")
+
     def publish_grid_densities(self):
         """Calculate and publish point densities for each grid cell."""
         if not any(self.grid_zone_counts):
@@ -545,7 +638,14 @@ class LeafWallLidarNode(Node):
             self.get_logger().info("No densities to save")
             return  # nothing to save
 
-        np.save(self.density_output_filename, np.array(self.grid_density_history))
+        with open(self.density_output_filename, 'w') as f:
+            # Header schreiben
+            f.write("timestamp,bottom,middle,top\n")
+            
+            # Daten schreiben
+            for timestamp, densities in self.grid_density_history:
+                f.write(f"{timestamp:.3f},{densities[0]},{densities[1]},{densities[2]}\n")
+        
         self.get_logger().info(f"Saved grid density history to {self.density_output_filename}")
 
         # Reset after saving

@@ -8,6 +8,7 @@ import can
 import subprocess
 import threading
 import time
+from datetime import datetime
 import struct
 
 ''' README
@@ -19,16 +20,19 @@ import struct
         --> remove '&' to make CTRL-C stop cangen
     --> killall cangen
 - Within 3 sec choose mode second with sub-address 02=0x02 and set to 126=0x7E
-    --> cansend can1 103#027E
+    --> cansend can1 101#027E
 - Set system pressure for all valves with ID 0x002 
     --> DLC = 2
     --> Byte 0: low byte in mbar
     --> Byte 1: high byte in mbar
     --> example: cansend can1 002#D007 for 2000 mbar = 0x7D0 = 0x07D0
 
-- For testing:
+- For testing all together:
     - killall cangen; for id in 101 102 103; do cangen can1 -I $id -D 0F00 -g 1000 & done
     - for id in 101 102 103; do cansend can1 ${id}#027E; done
+- For testing single valves:
+    - pkill -f "cangen.*-I 101"; cangen can1 -I 101 -D 0FFF -g 1000 &    --> for each valve
+    - for id in 101 102 103; do cansend can1 ${id}#027E; done    --> within 3 seconds after first call
 '''
 
 class ValveControlNode(Node):
@@ -176,6 +180,8 @@ class ValveControlNode(Node):
     def stop_callback(self, msg: Bool):
         """Handle stop signal from ROS topic"""
         if msg.data:
+            self.peripherie_stop_time = datetime.now()
+            self.get_logger().info(f"=== STOP RECEIVED AT: {self.peripherie_stop_time.strftime('%H:%M:%S.%f')[:-3]} ===")
             self.get_logger().info("Stop signal received → shutting down valve control node.")
             
             # Stop cyclic sender
@@ -186,7 +192,8 @@ class ValveControlNode(Node):
     
     def valve_commands_callback(self, msg: Float32MultiArray):
         """Process incoming valve commands"""
-        self.get_logger().info(f"VALVE COMMANDS RECEIVED at {time.time()}")
+        self.receive_time = datetime.now()
+        self.get_logger().info(f"=== VALVES RECEIVED AT: {self.receive_time.strftime('%H:%M:%S.%f')[:-3]} ===")
         try:
             data = msg.data
             
@@ -234,7 +241,7 @@ class ValveControlNode(Node):
                 with self.commands_lock:
                     # Send flow rates cyclically for all valves
                     # This prevents timeout even without new ROS messages
-                    for valve_id in [1, 2, 3]:
+                    for valve_id in [3, 2, 1]:
                         flow = self.valve_commands[valve_id]['flow_percent']
                         self.send_flow_rate(valve_id, flow)
                 
@@ -283,8 +290,9 @@ class ValveControlNode(Node):
             print("Closing all valves...")
             
             for valve_id in [1, 2, 3]:
-                can_id = 0x100 + valve_id
-                
+                hardware_mapping = {1: 103, 2: 102, 3: 101}
+                can_id = 0x100 + hardware_mapping[valve_id]                
+
                 # Send valve off command (mode 255 = de-energized/open for normally open valves)
                 close_data = [0x02, 0xFF]  # Sub-addr 2, Mode 255
                 close_msg = can.Message(arbitration_id=can_id, data=close_data, is_extended_id=False)

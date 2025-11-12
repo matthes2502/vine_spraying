@@ -28,7 +28,7 @@ class ADS1115Node(Node):
         self.chan = AnalogIn(ads, ADS.P0)
 
         # Publisher for fluid pressure messages
-        self.publisher_ = self.create_publisher(FluidPressure, 'pressure', 10)
+        self.publisher_ = self.create_publisher(FluidPressure, '/pressure', 10)
         
         # Create timer with configurable rate
         timer_period = 1.0 / publish_rate  # Convert Hz to seconds

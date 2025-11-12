@@ -81,16 +81,16 @@ def generate_launch_description():
             ]
         ),
 
-        # BNO085 IMU Node
-        Node(
-            package='my_spray_controller',
-            executable='bno085_node',
-            name='bno085_node',
-            output='screen',
-            parameters=[
-                {'publish_orientation_rate': 2.0}
-            ]
-        ),
+        # # BNO085 IMU Node
+        # Node(
+        #     package='my_spray_controller',
+        #     executable='bno085_node',
+        #     name='bno085_node',
+        #     output='screen',
+        #     parameters=[
+        #         {'publish_orientation_rate': 2.0}
+        #     ]
+        # ),
 
         # Valve Control Node
         Node(
@@ -100,36 +100,36 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # Scanner Node (Lidar)
-        Node(
-            package='my_spray_controller',
-            executable='scanner_node',
-            name='scanner_node',
-            output='screen',
-            parameters=[
-                {'lidar_height': 1.0},              # Height of lidar above ground
-                {'lateral_distance': 1.2},          # Distance to foliage wall (left/right)
-                {'grid_height_min': 0.4},           # Minimum height for grid (40cm)
-                {'grid_height_max': 2.0},           # Maximum height for grid (2m)
-                {'grid_length': 1.0},               # Grid length in driving direction (1m)
-                {'scan_history_distance': 1000.0},  # Keep last X meters of scans (set very high to keep all)
-                # {'save_to_file': True},
-                {'output_directory': scan_output_path}
-            ]
-        ),
-
-        # # Relais Controller Node
+        # # Scanner Node (Lidar)
         # Node(
         #     package='my_spray_controller',
-        #     executable='relais_node',
-        #     name='relais_node',
+        #     executable='scanner_node',
+        #     name='scanner_node',
         #     output='screen',
         #     parameters=[
-        #         {'main_pump_init': 'off'},
-        #         {'transfer_pump_init': 'off'}, # 'off', 'fw', or 'psm'
-        #         {'valve_init': 'off'} # 'off', 'fw', or 'psm'
+        #         {'lidar_height': 1.0},              # Height of lidar above ground
+        #         {'lateral_distance': 1.2},          # Distance to foliage wall (left/right)
+        #         {'grid_height_min': 0.4},           # Minimum height for grid (40cm)
+        #         {'grid_height_max': 2.0},           # Maximum height for grid (2m)
+        #         {'grid_length': 1.0},               # Grid length in driving direction (1m)
+        #         {'scan_history_distance': 1000.0},  # Keep last X meters of scans (set very high to keep all)
+        #         {'save_to_file': False},
+        #         {'output_directory': scan_output_path}
         #     ]
         # ),
+
+        # Relais Controller Node
+        Node(
+            package='my_spray_controller',
+            executable='relais_node',
+            name='relais_node',
+            output='screen',
+            parameters=[
+                {'main_pump_init': 'off'},
+                {'transfer_pump_init': 'off'}, # 'off', 'fw', or 'psm'
+                {'valve_init': 'off'} # 'off', 'fw', or 'psm'
+            ]
+        ),
 
         # Propeller Controller Node (C++ executable)
         Node(
@@ -139,13 +139,13 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # # Pump Controller Node (C++ executable)
-        # Node(
-        #     package='my_hardware_pwm_controller',
-        #     executable='pump_controller_node',
-        #     name='pump_controller_node',
-        #     output='screen',
-        # ),
+        # Pump Controller Node (C++ executable)
+        Node(
+            package='my_hardware_pwm_controller',
+            executable='pump_controller_node',
+            name='pump_controller_node',
+            output='screen',
+        ),
 
         # # RViz2 Visualization
         # Node(

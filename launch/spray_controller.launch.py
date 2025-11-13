@@ -155,4 +155,12 @@ def generate_launch_description():
         #     output='screen',
         #     arguments=['-d', rviz_config_path],
         # ),
+
+        # Data Logger Node 
+        Node(
+            package='my_spray_controller',
+            executable='data_logger_node',
+            name='data_logger_node',
+            output='screen',
+        ),
     ])

@@ -19,7 +19,7 @@ class SprayCoordinator(Node):
         self.get_logger().info("Spray Coordinator started")
 
         # Get parameters
-        self.declare_parameter('selected_nozzle', 'blue')
+        self.declare_parameter('selected_nozzle', 'orange')
         selected_nozzle = str(self.get_parameter('selected_nozzle').value)        
 
         # Status variables
@@ -381,7 +381,10 @@ class SprayCoordinator(Node):
         
         # Calculate pump speed based on average density
         avg_density = sum(density_percentages) / len(density_percentages)
-        target_pump_duty = self.interpolate_pump_duty(avg_density)
+        if avg_density < 50.0:
+            target_pump_duty = 0.0
+        else:
+            target_pump_duty = self.interpolate_pump_duty(avg_density)
         
         # Propeller speed (not used in your current setup)
         propeller_speed = 20.0

@@ -17,8 +17,8 @@ class SimpleTestPublisher(Node):
         
         # CONSTANT Test parameters - CHANGE THESE VALUES FOR TESTING
         self.test_speed = 0.62  # m/s - change this to test different speeds
-        self.test_density = [100000, 4400, 0]  # [bottom, middle, top] - change these values
-        self.test_duration = 15.0  # seconds - CHANGE THIS VALUE FOR TEST DURATION
+        self.test_density = [100000, 100000, 100000]  # [bottom, middle, top] - change these values
+        self.test_duration = 60.0  # seconds - CHANGE THIS VALUE FOR TEST DURATION
         
         # Calculate timer period based on speed (1 meter intervals)
         self.meter_interval = 1.0 / self.test_speed  # seconds per meter

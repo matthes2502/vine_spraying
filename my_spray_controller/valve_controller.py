@@ -10,6 +10,8 @@ import threading
 import time
 from datetime import datetime
 import struct
+from typing import Dict, Optional
+
 
 ''' README
 --> example for first valve with ID 0x101
@@ -33,12 +35,18 @@ import struct
 - For testing single valves:
     - pkill -f "cangen.*-I 101"; cangen can1 -I 101 -D 0FFF -g 1000 &    --> for each valve
     - for id in 101 102 103; do cansend can1 ${id}#027E; done    --> within 3 seconds after first call
+
+VALVE MAPPING:
+- valve_1 (unten) → CAN ID 103
+- valve_2 (mitte) → CAN ID 102  
+- valve_3 (oben) → CAN ID 101
 '''
 
 class ValveControlNode(Node):
     # Configuration constants
     INITIAL_FLOW_PERCENT = 0.0  # Change this to 0.0 (closed) or 100.0 (open)
-    VALVE_MODE = 0x7E  # Mode stays constant
+    MODE_PERCENT = 0x7E  # Mode for percentage control (1-100%)
+    MODE_OFF = 0x00      # Mode for completely off (0%)
     CYCLE_TIME_SEC = 0.05  # 50ms cycle time for flow updates
     
     def __init__(self):
@@ -50,6 +58,13 @@ class ValveControlNode(Node):
         self.shutdown_can_on_exit = False  # Set to True in production, False for testing
         self.can_started_by_us = False  # Track if we started the interface
         
+        # Hardware mapping: logical valve ID to CAN ID
+        self.valve_to_can_id = {
+            1: 0x103,  # valve_1 (unten) → CAN ID 103
+            2: 0x102,  # valve_2 (mitte) → CAN ID 102
+            3: 0x101   # valve_3 (oben) → CAN ID 101
+        }
+        
         # Valve command buffer (thread-safe)
         # Initialize with INITIAL_FLOW_PERCENT
         self.valve_commands = {
@@ -58,6 +73,13 @@ class ValveControlNode(Node):
             3: {'system_pressure': 0.0, 'flow_percent': self.INITIAL_FLOW_PERCENT}
         }
         self.commands_lock = threading.Lock()
+        
+        # Track current mode for each valve to avoid unnecessary mode changes
+        self.valve_current_modes: Dict[int, Optional[int]] = {
+            1: None,  # Track current mode for valve 1
+            2: None,  # Track current mode for valve 2  
+            3: None   # Track current mode for valve 3
+        }
         
         # Track last sent pressure to avoid unnecessary sends
         self.last_sent_pressure = None
@@ -96,8 +118,8 @@ class ValveControlNode(Node):
         # Wait for cyclic sender to establish flow rates
         time.sleep(1.0)
         
-        # Set valve mode once (after flow rates are established)
-        self.set_valve_modes()
+        # Set initial valve modes based on initial flow
+        self.set_initial_valve_modes()
                 
         self.get_logger().info("Valve control node initialized")
         
@@ -157,25 +179,48 @@ class ValveControlNode(Node):
         else:
             pass
     
-    def set_valve_modes(self):
-        """Set valve modes once after flow rates are established"""
+    def set_initial_valve_modes(self):
+        """Set initial valve modes based on initial flow values"""
         try:
-            self.get_logger().info("Setting valve modes...")
+            self.get_logger().info("Setting initial valve modes...")
             
-            for valve_id in [1, 2, 3]:
-                can_id = 0x100 + valve_id
+            with self.commands_lock:
+                for valve_id in [1, 2, 3]:
+                    flow_percent = self.valve_commands[valve_id]['flow_percent']
+                    self.set_valve_mode_for_flow(valve_id, flow_percent)
+                    time.sleep(0.1)
                 
-                # Set valve mode (Sub-addr 2, Mode from constant)
-                mode_data = [0x02, self.VALVE_MODE]
+            self.get_logger().info("All initial valve modes set")
+            
+        except Exception as e:
+            self.get_logger().error(f"Error setting initial valve modes: {e}")
+    
+    def set_valve_mode_for_flow(self, valve_id, flow_percent):
+        """Set valve mode based on flow percentage"""
+        try:
+            can_id = self.valve_to_can_id[valve_id]
+            
+            # Determine required mode
+            if flow_percent == 0.0:
+                required_mode = self.MODE_OFF
+                mode_name = "OFF"
+            else:
+                required_mode = self.MODE_PERCENT
+                mode_name = "PERCENT"
+            
+            # Only send mode change if different from current mode
+            if self.valve_current_modes[valve_id] != required_mode:
+                mode_data = [0x02, required_mode]
                 mode_msg = can.Message(arbitration_id=can_id, data=mode_data, is_extended_id=False)
                 self.can_bus.send(mode_msg)
                 
-                time.sleep(0.1)
+                # Update tracked mode
+                self.valve_current_modes[valve_id] = required_mode
                 
-            self.get_logger().info(f"All valve modes set to 0x{self.VALVE_MODE:02X}")
+                self.get_logger().debug(f"Valve {valve_id} (CAN 0x{can_id:02X}) mode set to {mode_name} (0x{required_mode:02X}) for flow {flow_percent}%")
             
         except Exception as e:
-            self.get_logger().error(f"Error setting valve modes: {e}")
+            self.get_logger().error(f"Error setting valve {valve_id} mode: {e}")
     
     def stop_callback(self, msg: Bool):
         """Handle stop signal from ROS topic"""
@@ -212,8 +257,15 @@ class ValveControlNode(Node):
                     flow_percent = data[i + 2]
                     
                     if valve_id in self.valve_commands:
+                        # Check if flow changed and mode change is needed
+                        old_flow = self.valve_commands[valve_id]['flow_percent']
+                        
                         # Update flow percent (will be sent cyclically)
                         self.valve_commands[valve_id]['flow_percent'] = flow_percent
+                        
+                        # Set mode if flow changed from 0 to >0 or >0 to 0
+                        if (old_flow == 0.0 and flow_percent > 0.0) or (old_flow > 0.0 and flow_percent == 0.0):
+                            self.set_valve_mode_for_flow(valve_id, flow_percent)
                         
                         self.get_logger().debug(f"Updated valve {valve_id}: flow={flow_percent:.1f}%")
                     else:
@@ -241,7 +293,7 @@ class ValveControlNode(Node):
                 with self.commands_lock:
                     # Send flow rates cyclically for all valves
                     # This prevents timeout even without new ROS messages
-                    for valve_id in [3, 2, 1]:
+                    for valve_id in [1, 2, 3]:
                         flow = self.valve_commands[valve_id]['flow_percent']
                         self.send_flow_rate(valve_id, flow)
                 
@@ -273,7 +325,8 @@ class ValveControlNode(Node):
     def send_flow_rate(self, valve_id, flow_percent):
         """Send flow rate to individual valve (called cyclically)"""
         try:
-            can_id = 0x100 + valve_id  # 0x101, 0x102, 0x103
+            # Use correct CAN ID mapping
+            can_id = self.valve_to_can_id[valve_id]
             
             # Send flow rate (0-100% mapped to 0-255)
             flow_value = int(max(0, min(100, flow_percent)) * 2.55)  # Map 0-100% to 0-255
@@ -290,8 +343,7 @@ class ValveControlNode(Node):
             print("Closing all valves...")
             
             for valve_id in [1, 2, 3]:
-                hardware_mapping = {1: 103, 2: 102, 3: 101}
-                can_id = 0x100 + hardware_mapping[valve_id]                
+                can_id = self.valve_to_can_id[valve_id]
 
                 # Send valve off command (mode 255 = de-energized/open for normally open valves)
                 close_data = [0x02, 0xFF]  # Sub-addr 2, Mode 255

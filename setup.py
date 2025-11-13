@@ -42,6 +42,7 @@ setup(
             # "pump_test_node = my_spray_controller.pump_test_node:main",
             "rplidar_complete_test_node = my_spray_controller.rplidar_tester_complete:main",
             "show_pointcloud_node = my_spray_controller.show_saved_pointcloud:main",
+            "data_logger_node = my_spray_controller.data_logger:main",
         ],
     },
 )

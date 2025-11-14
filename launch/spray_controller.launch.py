@@ -113,23 +113,23 @@ def generate_launch_description():
                 {'grid_height_max': 2.0},           # Maximum height for grid (2m)
                 {'grid_length': 1.0},               # Grid length in driving direction (1m)
                 {'scan_history_distance': 1000.0},  # Keep last X meters of scans (set very high to keep all)
-                {'save_to_file': True},
+                {'save_to_file': False},
                 {'output_directory': scan_output_path}
             ]
         ),
 
-        # # Relais Controller Node
-        # Node(
-        #     package='my_spray_controller',
-        #     executable='relais_node',
-        #     name='relais_node',
-        #     output='screen',
-        #     parameters=[
-        #         {'main_pump_init': 'off'},
-        #         {'transfer_pump_init': 'off'}, # 'off', 'fw', or 'psm'
-        #         {'valve_init': 'off'} # 'off', 'fw', or 'psm'
-        #     ]
-        # ),
+        # Relais Controller Node
+        Node(
+            package='my_spray_controller',
+            executable='relais_node',
+            name='relais_node',
+            output='screen',
+            parameters=[
+                {'main_pump_init': 'off'},
+                {'transfer_pump_init': 'off'}, # 'off', 'fw', or 'psm'
+                {'valve_init': 'off'} # 'off', 'fw', or 'psm'
+            ]
+        ),
 
         # Propeller Controller Node (C++ executable)
         Node(
@@ -139,13 +139,13 @@ def generate_launch_description():
             output='screen',
         ),
 
-        # # Pump Controller Node (C++ executable)
-        # Node(
-        #     package='my_hardware_pwm_controller',
-        #     executable='pump_controller_node',
-        #     name='pump_controller_node',
-        #     output='screen',
-        # ),
+        # Pump Controller Node (C++ executable)
+        Node(
+            package='my_hardware_pwm_controller',
+            executable='pump_controller_node',
+            name='pump_controller_node',
+            output='screen',
+        ),
 
         # # RViz2 Visualization
         # Node(
@@ -156,11 +156,11 @@ def generate_launch_description():
         #     arguments=['-d', rviz_config_path],
         # ),
 
-        # Data Logger Node 
-        Node(
-            package='my_spray_controller',
-            executable='data_logger_node',
-            name='data_logger_node',
-            output='screen',
-        ),
+        # # Data Logger Node 
+        # Node(
+        #     package='my_spray_controller',
+        #     executable='data_logger_node',
+        #     name='data_logger_node',
+        #     output='screen',
+        # ),
     ])

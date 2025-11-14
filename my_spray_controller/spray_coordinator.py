@@ -19,7 +19,7 @@ class SprayCoordinator(Node):
         self.get_logger().info("Spray Coordinator started")
 
         # Get parameters
-        self.declare_parameter('selected_nozzle', 'purple')
+        self.declare_parameter('selected_nozzle', 'orange')
         selected_nozzle = str(self.get_parameter('selected_nozzle').value)        
 
         # Status variables

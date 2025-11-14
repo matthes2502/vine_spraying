@@ -56,7 +56,7 @@ class TestPublisher(Node):
         
         # Generate random speed once for entire session
         # self.test_speed = random.uniform(0.16, 0.50)  # upper val 1.57 
-        self.test_speed = 0.62  # upper val 1.57 
+        self.test_speed = 0.08  # upper val 1.57 
         
         # Calculate timer period based on speed (1 meter intervals)
         self.meter_interval = 1.0 / self.test_speed

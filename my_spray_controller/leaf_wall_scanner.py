@@ -271,12 +271,6 @@ class LeafWallLidarNode(Node):
                     # Save point cloud
                     self.publish_pointcloud(self.all_points)
                     self.save_scan_data(self.all_points)
-                    
-                    # Save grid density history
-                    if self.grid_density_history:
-                        self.save_grid_density_history()
-                    else:
-                        self.get_logger().warning("No grid densities to save for this session")
                         
                 else:
                     self.get_logger().warning("No scan data collected - buffer is empty. Session paused without saving.")
@@ -315,6 +309,9 @@ class LeafWallLidarNode(Node):
     def stop_callback(self, msg: Bool):
         """Handle stop signal from /peripherie/stop topic."""
         if msg.data:
+            self.get_logger().info("Received stop signal, waiting for file operations to complete...")
+            time.sleep(5)  # Give file operations time to complete
+            
             with self.shutdown_lock:
                 self.shutdown_requested = True
             self.get_logger().info("Received stop signal, initiating shutdown...")
@@ -476,7 +473,7 @@ class LeafWallLidarNode(Node):
 
             self.logger_count = self.logger_count + 1
 
-        if self.distance_traveled - self.lidar_nozzle_offset > 6.0:
+        if self.distance_traveled - self.lidar_nozzle_offset > 6.1:
             self.get_logger().info(f"Sending 'spray_pause' at lidar position {self.distance_traveled} and nozzle position {self.distance_traveled-self.lidar_nozzle_offset:.2f}m")
             pause_msg = String()
             pause_msg.data = "spray_pause"
@@ -553,7 +550,6 @@ class LeafWallLidarNode(Node):
         if (self.pending_grid_publishes and 
             self.distance_traveled >= self.pending_grid_publishes[0][1]):
             grid_data, target_distance = self.pending_grid_publishes.popleft()
-            self.get_logger().info(f"Grid Data at {self.distance_traveled:.2f} is [{grid_data}]")
     
             # Check if spraying should be stopped
             if self.lost_wall_forever and sum(grid_data) == 0:
@@ -631,25 +627,6 @@ class LeafWallLidarNode(Node):
 
         # Reset for next grid
         self.grid_zone_counts = [0] * (len(self.grid_heights)-1)
-
-    def save_grid_density_history(self):
-        """Save the accumulated grid densities to a .npy file."""
-        if not self.grid_density_history:
-            self.get_logger().info("No densities to save")
-            return  # nothing to save
-
-        with open(self.density_output_filename, 'w') as f:
-            # Header schreiben
-            f.write("timestamp,bottom,middle,top\n")
-            
-            # Daten schreiben
-            for timestamp, densities in self.grid_density_history:
-                f.write(f"{timestamp:.3f},{densities[0]},{densities[1]},{densities[2]}\n")
-        
-        self.get_logger().info(f"Saved grid density history to {self.density_output_filename}")
-
-        # Reset after saving
-        self.grid_density_history = []
     
     def save_scan_data(self, points: np.ndarray):
         """Save scan data to new session file if saving is enabled."""
@@ -659,6 +636,12 @@ class LeafWallLidarNode(Node):
         
         # Save the complete point cloud
         np.save(self.scan_output_filename, points)
+
+        try:
+            os.sync()  # Force filesystem sync
+        except:
+            pass
+
         self.get_logger().info(f"Saved scan session to: {self.scan_output_filename}")
         self.get_logger().info(f"Session contained {len(points)} points, traveled {self.distance_traveled:.2f}m")
 

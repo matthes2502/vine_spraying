@@ -16,20 +16,20 @@ def generate_launch_description():
     scan_output_path = '/home/matthes/Projects/ros2_ws/src/my_spray_controller/lidar_scans'
 
     # sllidar launch file
-    sllidar_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
-            os.path.join(
-                get_package_share_directory('sllidar_ros2'),
-                'launch',
-                'sllidar_a3_launch.py'
-            )
-        ]),
-        launch_arguments={
-            # 'scan_mode': 'Stability',           # for use outdoors or inside with sun light
-            'scan_mode': 'Sensitivity',         # for use indoors with non natural light
-            # 'serial_port': '/dev/ttyUSB0',
-        }.items()
-    )
+    # sllidar_launch = IncludeLaunchDescription(
+    #     PythonLaunchDescriptionSource([
+    #         os.path.join(
+    #             get_package_share_directory('sllidar_ros2'),
+    #             'launch',
+    #             'sllidar_a3_launch.py'
+    #         )
+    #     ]),
+    #     launch_arguments={
+    #         # 'scan_mode': 'Stability',           # for use outdoors or inside with sun light
+    #         'scan_mode': 'Sensitivity',         # for use indoors with non natural light
+    #         # 'serial_port': '/dev/ttyUSB0',
+    #     }.items()
+    # )
 
     return LaunchDescription([
         # SLLIDAR

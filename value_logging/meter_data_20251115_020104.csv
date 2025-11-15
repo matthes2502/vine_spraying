@@ -1,0 +1,7 @@
+meter,time_relative,density_percentage_unten,density_percentage_mitte,density_percentage_oben,grid_density_unten,grid_density_mitte,grid_density_oben,valve_commands_unten,valve_commands_mitte,valve_commands_oben,pump_pwm_command
+1,0.0006220340728759766,0,0,0,5127,6086,4807,0.0,0.0,0.0,0.0
+
+# Summary
+# start_time,0
+# end_time,7.160645008087158
+# total_meters,1
